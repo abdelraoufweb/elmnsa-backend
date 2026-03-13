@@ -35,19 +35,19 @@ const upload = multer({
   }
 });
 
-// Public Routes
+// Authenticated Routes (these endpoints require authMiddleware)
 
 /**
  * List videos with filtering
  * GET /api/videos?grade=10&curriculum=american&page=1&limit=10
  */
-router.get('/', videoController.listVideos);
+router.get('/', authMiddleware, videoController.listVideos);
 
 /**
  * Get video details
  * GET /api/videos/:videoId
  */
-router.get('/:videoId', videoController.getVideo);
+router.get('/:videoId', authMiddleware, videoController.getVideo);
 
 // Protected Routes (Requires authentication)
 
@@ -91,5 +91,17 @@ router.post('/:videoId/access-codes', authMiddleware, videoController.createAcce
  * Admin or Developer only
  */
 router.get('/:videoId/access-codes', authMiddleware, videoController.getAccessCodes);
+
+/**
+ * Get video progress
+ * GET /api/videos/:videoId/progress
+ */
+router.get('/:videoId/progress', authMiddleware, videoController.getProgress);
+
+/**
+ * Save video progress
+ * POST /api/videos/:videoId/progress
+ */
+router.post('/:videoId/progress', authMiddleware, videoController.saveProgress);
 
 module.exports = router;

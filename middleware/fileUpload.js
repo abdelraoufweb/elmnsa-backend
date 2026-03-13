@@ -1,11 +1,12 @@
 // ==========================================
-// FILE UPLOAD MIDDLEWARE
+// FILE UPLOAD MIDDLEWARE (R2 INTEGRATED)
 // ==========================================
 
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { uploadFile, deleteFileFromR2 } = require('../services/s3Service');
 
 // Ensure upload directory exists
 const uploadDir = process.env.UPLOAD_DIR || './uploads';
@@ -132,16 +133,43 @@ const uploadMaterial = multer({
   limits: { fileSize: 500 * 1024 * 1024 } // 500MB
 });
 
-// Helper to get file URL
-const getFileUrl = (category, filename) => {
+// Helper to get file URL (Supports Local & R2)
+const getFileUrl = (category, filename, isR2 = false) => {
+  if (isR2) {
+    return `${process.env.R2_PUBLIC_URL}/${category}/${filename}`;
+  }
   return `${process.env.SERVER_URL}/uploads/${category}/${filename}`;
 };
 
-// Helper to delete file
-const deleteFile = (filePath) => {
+// Helper for R2 Auto-Upload (Middleware Style)
+const handleR2Upload = (category) => async (req, res, next) => {
+  if (!req.file) return next();
+
   try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    const publicUrl = await uploadFile(req.file, category);
+    req.file.r2Url = publicUrl;
+    next();
+  } catch (error) {
+    console.error('R2 Middleware Upload Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to upload to Cloud Storage' });
+  }
+};
+
+// Helper to delete file (Handles both Local and R2)
+const deleteFile = async (fileRef) => {
+  try {
+    if (!fileRef) return;
+
+    // If it's a URL and contains R2 dev domain, delete from R2
+    if (fileRef.includes('r2.dev') || fileRef.includes('cloudflarestorage.com')) {
+      await deleteFileFromR2(fileRef);
+      return true;
+    }
+
+    // Otherwise assume local path
+    const absolutePath = path.isAbsolute(fileRef) ? fileRef : path.join(__dirname, '..', fileRef.replace(/^\//, ''));
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
       return true;
     }
   } catch (error) {
@@ -155,6 +183,7 @@ module.exports = {
   uploadWorksheet,
   uploadProfile,
   uploadMaterial,
+  handleR2Upload,
   getFileUrl,
   deleteFile
 };

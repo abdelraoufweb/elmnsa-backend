@@ -99,7 +99,7 @@ describe('Theme Controller', () => {
 
       expect(response.status).toBe(200);
       const themes = response.body.data;
-      
+
       // Each theme should have a name
       themes.forEach(theme => {
         expect(theme.name).toBeDefined();
@@ -111,7 +111,7 @@ describe('Theme Controller', () => {
         .get('/api/themes');
 
       const themeNames = response.body.data.map(t => t.name);
-      
+
       // Check for some common themes
       expect(themeNames).toContain('Dark');
       expect(themeNames).toContain('Light');
@@ -368,7 +368,7 @@ describe('Theme Controller', () => {
             themeName: themeName
           });
 
-        expect(response.status).toBeOneOf([200, 201]);
+        expect([200, 201]).toContain(response.status);
       });
     });
 

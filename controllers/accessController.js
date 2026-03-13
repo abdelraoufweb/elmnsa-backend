@@ -75,12 +75,22 @@ const logSecurityEvent = async (logData) => {
 /**
  * Verify access code and return JWT token + redirect URL
  * POST /api/access/verify
- * 
+ *
  * Request body:
  * { accessCode: "string" }
- * 
- * Response:
- * { success: true, token: "JWT_TOKEN", redirectTo: "/student-dashboard" }
+ *
+ * Response (success):
+ * {
+ *   success: true,
+ *   message: string,
+ *   data: {
+ *     token: string,
+ *     redirectTo: string,
+ *     role: string
+ *   }
+ * }
+ *
+ * Response (failure):
  * { success: false, message: "Invalid code" }
  */
 exports.verifyAccessCode = async (req, res) => {
@@ -172,14 +182,15 @@ exports.verifyAccessCode = async (req, res) => {
       codeRecord.currentUsers = (codeRecord.currentUsers || 0) + 1;
       await codeRecord.save();
     }
-
     // ✅ Return success response with token and redirect URL
     return res.status(200).json({
       success: true,
-      token: token,
-      redirectTo: redirectTo,
-      role: role,
-      message: `Access granted as ${role}`
+      message: `Access granted as ${role}`,
+      data: {
+        token: token,
+        redirectTo: redirectTo,
+        role: role
+      }
     });
 
   } catch (error) {
@@ -431,6 +442,73 @@ exports.disableAccessCode = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to disable access code'
+    });
+  }
+};
+
+/**
+ * Create test access code (Development only)
+ * Used for testing the verification flow
+ */
+exports.createTestAccessCode = async (req, res) => {
+  try {
+    // Allow only in development or when a dedicated feature flag is enabled
+    const allowTestCodes = process.env.NODE_ENV === 'development' || process.env.ENABLE_TEST_ACCESS_CODES === 'true';
+    if (!allowTestCodes) {
+      return res.status(403).json({ success: false, message: 'Test access codes are disabled' });
+    }
+
+    // Require an authenticated admin/developer identity to create even in development
+    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admin or developer can create test access codes' });
+    }
+
+    const { code = 'TEST123', type = 'student', role = 'student', redirectTo = '/dashboard' } = req.body;
+
+    // Prevent creation of privileged roles via this endpoint
+    const forbiddenRoles = ['admin', 'developer'];
+    if (forbiddenRoles.includes(role)) {
+      return res.status(400).json({ success: false, message: 'Creating privileged roles is not allowed via this endpoint' });
+    }
+
+    // Check if code already exists
+    const existing = await AccessCode.findOne({ code });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: 'Access code already exists'
+      });
+    }
+
+    // Create new access code
+    const newCode = new AccessCode({
+      code,
+      type,
+      role,
+      redirectTo,
+      active: true,
+      expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
+    });
+
+    await newCode.save();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Test access code created',
+      data: {
+        code: newCode.code,
+        type: newCode.type,
+        role: newCode.role,
+        redirectTo: newCode.redirectTo
+      }
+    });
+
+  } catch (error) {
+    console.error('Create test code error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create test access code',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };

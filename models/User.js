@@ -104,8 +104,10 @@ const userSchema = new mongoose.Schema({
   // Account Management
   approvedAt: Date,
   approvedBy: String,
+  rejectedAt: Date,           // ✅ FIXED: Add rejectedAt field
+  rejectedBy: String,         // ✅ FIXED: Add rejectedBy field
   blockedAt: Date,
-  blockReason: String,
+  blockedReason: String,      // ✅ FIXED: Changed from blockReason to blockedReason
   blockedBy: String,
   suspendedAt: Date,
   suspensionReason: String,

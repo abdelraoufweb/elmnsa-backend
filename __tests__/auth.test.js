@@ -224,7 +224,7 @@ describe('Authentication Controller', () => {
         });
 
       // This would depend on what codes exist in the database
-      expect(response.status).toBeOneOf([200, 404]);
+      expect([200, 404]).toContain(response.status);
       expect(response.body.success).toBeDefined();
     });
 

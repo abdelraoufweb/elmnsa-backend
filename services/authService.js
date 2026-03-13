@@ -107,7 +107,7 @@ const loginUser = async (phoneNumber, password) => {
         status: 403,
         message: 'Account blocked',
         error: 'ACCOUNT_BLOCKED',
-        reason: user.blockReason
+        reason: user.blockedReason
       };
     }
 

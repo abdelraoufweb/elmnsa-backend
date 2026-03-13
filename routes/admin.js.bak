@@ -7,17 +7,39 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const { authMiddleware, authorize } = require('../middleware/auth');
 
-// All admin routes require authentication and appropriate admin/developer roles
+// All admin routes require authentication and admin/developer role
 
 /**
  * @route   GET /api/admin/dashboard
  * @desc    Get dashboard statistics
  * @access  Private (Admin, Developer)
  */
-router.get('/dashboard', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.getDashboard);
-router.get('/logs', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.getSecurityLogs);
-router.get('/students', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.getAllStudents);
-router.get('/pending-accounts', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.getPendingAccounts);
+router.get('/dashboard', authMiddleware, authorize(['admin', 'developer']), adminController.getDashboard);
+
+/**
+ * @route   GET /api/admin/logs
+ * @desc    Get security logs with filtering
+ * @query   type - filter by log type (login, logout, registration, account_approved, etc)
+ * @query   days - number of days to go back (default: 7)
+ * @query   page - page number (default: 1)
+ * @query   limit - items per page (default: 20)
+ * @access  Private (Admin, Developer)
+ */
+router.get('/logs', authMiddleware, authorize(['admin', 'developer']), adminController.getSecurityLogs);
+
+/**
+ * @route   GET /api/admin/students
+ * @desc    Get all students (approved, pending, blocked, etc.)
+ * @access  Private (Admin, Developer)
+ */
+router.get('/students', authMiddleware, authorize(['admin', 'developer']), adminController.getAllStudents);
+
+/**
+ * @route   GET /api/admin/pending-accounts
+ * @desc    Get all pending user accounts awaiting approval
+ * @access  Private (Admin, Developer)
+ */
+router.get('/pending-accounts', authMiddleware, authorize(['admin', 'developer']), adminController.getPendingAccounts);
 
 /**
  * @route   POST /api/admin/approve-account

@@ -1,28 +1,30 @@
 // ==========================================
-// MAIN SERVER FILE - EXPRESS + MONGODB
+// PRODUCTION-READY SERVER - RAILWAY COMPATIBLE
 // ==========================================
 
 require('dotenv').config();
+
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const helmet = require('helmet');
-const path = require('path');
+
+// Disable buffering globally BEFORE any models are required to prevent hanging queries on disconnect
+mongoose.set('bufferCommands', false);
+
+mongoose.connection.on('disconnected', () => console.log('⚠️ MongoDB disconnected!'));
+mongoose.connection.on('reconnected', () => console.log('🔄 MongoDB reconnected!'));
+mongoose.connection.on('error', (err) => console.error('❌ MongoDB error:', err));
+
+const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 
-// Routes
-const authRoutes = require('./routes/auth');
-const accessRoutes = require('./routes/access');
-const videoRoutes = require('./routes/videos');
-const studentRoutes = require('./routes/students');
-const messageRoutes = require('./routes/messages');
-const themeRoutes = require('./routes/themes');
-const adminRoutes = require('./routes/admin');
-const deviceRoutes = require('./routes/devices');
+// ==========================================
+// PORT CONFIGURATION (RAILWAY COMPATIBLE)
+// ==========================================
 
-// Middleware
-const { authMiddleware } = require('./middleware/auth');
-const { validateDeviceAccess } = require('./middleware/deviceValidator');
+const PORT = process.env.PORT || 5000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // ==========================================
 // ENVIRONMENT VALIDATION
@@ -30,8 +32,7 @@ const { validateDeviceAccess } = require('./middleware/deviceValidator');
 
 const requiredEnvVars = [
   'JWT_SECRET',
-  'MONGODB_URI',
-  'NODE_ENV'
+  'MONGODB_URI'
 ];
 
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -41,127 +42,229 @@ if (missingVars.length > 0) {
   missingVars.forEach(varName => {
     console.error(`   - ${varName}`);
   });
-  console.error('\nPlease set these in your .env file before starting the server.');
+  console.error('\nPlease set these in Railway Dashboard.');
   process.exit(1);
 }
 
-// Validate JWT_SECRET length (minimum 32 characters for HS256)
+// Validate JWT_SECRET length
 if (process.env.JWT_SECRET.length < 32) {
   console.error('❌ FATAL: JWT_SECRET must be at least 32 characters long');
   process.exit(1);
 }
 
-// Validate NODE_ENV is one of allowed values
-const validNodeEnv = ['development', 'production', 'testing'];
-if (!validNodeEnv.includes(process.env.NODE_ENV)) {
-  console.error(`❌ FATAL: NODE_ENV must be one of: ${validNodeEnv.join(', ')}`);
-  process.exit(1);
-}
-
-// Validate CORS is configured for production
-if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
-  console.error('❌ FATAL: CORS_ORIGIN must be set in production');
-  process.exit(1);
-}
-
-console.log('✅ All required environment variables are set');
+console.log('✅ Environment variables validated');
 
 // ==========================================
 // INITIALIZE EXPRESS APP
 // ==========================================
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
 // ==========================================
-// SECURITY & CORS MIDDLEWARE
+// HTTP SERVER (RAILWAY COMPATIBLE)
 // ==========================================
 
-app.use(helmet());
+const server = http.createServer(app);
 
-// Rate limiters
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,  // 15 minutes
-  max: 5,  // 5 attempts per windowMs
-  message: 'Too many login attempts, please try again later',
-  standardHeaders: true,
-  skipSuccessfulRequests: false
+// ==========================================
+// SOCKET.IO CONFIGURATION
+// ==========================================
+
+// Reuse the same origins configuration used by Express CORS
+const allowedOrigins = NODE_ENV === 'production'
+  ? (process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : []) // Fallback to empty (safe) in production
+  : true;
+
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
+  pingInterval: 30000,
+  pingTimeout: 60000,
+  maxHttpBufferSize: 1e6
 });
 
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true
-});
+// ==========================================
+// CORS MIDDLEWARE
+// ==========================================
 
-// CORS Configuration - Allow remote frontends
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || undefined,
+  origin: allowedOrigins,
   credentials: true,
-  optionsSuccessStatus: 200
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
-
-if (!process.env.CORS_ORIGIN && process.env.NODE_ENV === 'development') {
-  console.warn('⚠️  WARNING: CORS_ORIGIN not set. Using unrestricted CORS (development only)');
-  corsOptions.origin = '*';
-}
 
 app.use(cors(corsOptions));
 
-// Apply rate limiters
+// ==========================================
+// SECURITY MIDDLEWARE
+// ==========================================
+
+const helmet = require('helmet');
+const mongoSanitize = require('express-mongo-sanitize');
+const xss = require('xss');
+const hpp = require('hpp');
+
+// Set security headers with Helmet
+app.use(helmet());
+
+// Data sanitization against NoSQL query injection
+app.use(mongoSanitize());
+
+// Data sanitization against XSS using the 'xss' library
+const filterXSS = xss;
+app.use((req, res, next) => {
+  try {
+    const sanitizeObject = (obj) => {
+      if (!obj || typeof obj !== 'object') return obj;
+      for (const k of Object.keys(obj)) {
+        if (typeof obj[k] === 'string') {
+          obj[k] = filterXSS(obj[k]);
+        } else if (typeof obj[k] === 'object') {
+          sanitizeObject(obj[k]);
+        }
+      }
+    };
+
+    sanitizeObject(req.body);
+    sanitizeObject(req.query);
+    sanitizeObject(req.params);
+  } catch (e) {
+    // If sanitization fails, continue without blocking request
+    console.error('XSS sanitization error:', e);
+  }
+  next();
+});
+
+// Prevent HTTP Parameter Pollution
+app.use(hpp());
+
+// ==========================================
+// RATE LIMITING MIDDLEWARE
+// ==========================================
+
+// General API limiter
+const limiter = rateLimit({
+  windowMs: (parseInt(process.env.RATE_LIMIT_WINDOW) || 15) * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests, please try again later.' }
+});
+
+// Stricter limiter for auth routes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // Limit each IP to 20 login/register requests per window
+  message: { success: false, message: 'Too many login attempts, please try again after 15 minutes.' }
+});
+
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
-app.use('/api/auth/verify-access-code', authLimiter);
-app.use(generalLimiter);
+app.use('/api/auth/verify-access-code', authLimiter); // Stricter limit for codes
+app.use('/api/', limiter);
 
 // ==========================================
-// BODY PARSER MIDDLEWARE
+// EXPRESS MIDDLEWARE
 // ==========================================
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// ==========================================
-// STATIC FILES
-// ==========================================
-
+// Serve static files from uploads directory
+const path = require('path');
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  req.io = io; // Attach socket.io to request for controllers
+  next();
+});
+
 // ==========================================
-// API ROUTES
+// HEALTH CHECK ROUTE
 // ==========================================
 
-// Access code verification (public - no authentication required)
-app.use('/api/access', accessRoutes);
-
-// Auth routes (public)
-app.use('/api/auth', authRoutes);
-
-// Protected routes (require authentication)
-app.use('/api/videos', authMiddleware, validateDeviceAccess, videoRoutes);
-app.use('/api/students', authMiddleware, studentRoutes);
-app.use('/api/messages', authMiddleware, validateDeviceAccess, messageRoutes);
-app.use('/api/themes', authMiddleware, themeRoutes);
-app.use('/api/admin', authMiddleware, adminRoutes);
-app.use('/api/devices', deviceRoutes);  // authMiddleware is inside each route
-
-// Health check
-app.get('/api/health', (req, res) => {
-  const isConnected = process.env.DEMO_MODE !== 'true';
+app.get('/', (req, res) => {
   res.status(200).json({
-    success: true,
-    message: isConnected ? 'Server running with database' : 'Server running (limited mode)',
+    status: 'ok',
+    env: NODE_ENV,
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    database: isConnected ? 'connected' : 'unavailable',
-    mode: isConnected ? 'production' : 'limited',
-    environment: process.env.NODE_ENV || 'development'
+    uptime: process.uptime()
   });
 });
 
-// Health check endpoint for Docker health checks (no /api prefix)
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
+});
+
+// ==========================================
+// SOCKET.IO EVENT HANDLERS
+// ==========================================
+
+const { setupSocketHandlers } = require('./services/socketManager');
+setupSocketHandlers(io);
+
+// ==========================================
+// API ROUTES - IMPORT ROUTE MODULES
+// ==========================================
+
+const authRoutes = require('./routes/auth');
+const studentRoutes = require('./routes/students');
+const storeRoutes = require('./routes/store');
+const videosRoutes = require('./routes/videos');
+const messagesRoutes = require('./routes/messages');
+const themesRoutes = require('./routes/themes');
+const devicesRoutes = require('./routes/devices');
+const adminRoutes = require('./routes/admin');
+const aiRoutes = require('./routes/ai');
+const accessRoutes = require('./routes/access');
+const groupRoutes = require('./routes/groups');
+const announcementRoutes = require('./routes/announcement');
+const scheduleRoutes = require('./routes/schedule');
+
+
+// ==========================================
+// MOUNT API ROUTES
+// ==========================================
+
+app.use('/api/auth', authRoutes);
+app.use('/api/students', studentRoutes);
+app.use('/api/store', storeRoutes);
+app.use('/api/videos', videosRoutes);
+app.use('/api/messages', messagesRoutes);
+app.use('/api/themes', themesRoutes);
+app.use('/api/devices', devicesRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/access', accessRoutes);
+app.use('/api/groups', groupRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/schedules', scheduleRoutes);
+
+app.use('/api/profile-requests', require('./routes/profileRequests'));
+app.use('/api/live-sessions', require('./routes/live-sessions'));
+
+// ==========================================
+// BACKGROUND SERVICES
+// ==========================================
+const { startCleanupService } = require('./services/cleanupService');
+startCleanupService();
+
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Backend is healthy',
+    env: NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ==========================================
@@ -169,101 +272,166 @@ app.get('/health', (req, res) => {
 // ==========================================
 
 app.use((req, res) => {
+  console.log(`⚠️  404 Not Found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({
-    success: false,
-    message: 'Endpoint not found',
+    error: 'Not Found',
     path: req.path
   });
 });
 
 // ==========================================
-// ERROR HANDLER
-// ==========================================
-
-app.use((err, req, res, next) => {
-  console.error('[ERROR]', {
-    status: err.status || 500,
-    message: err.message,
-    timestamp: new Date().toISOString(),
-    path: req.path
-  });
-  
-  // Never expose error details in production
-  const errorResponse = {
-    success: false,
-    message: 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { error: err.message })
-  };
-
-  res.status(err.status || 500).json(errorResponse);
-});
-
-// ==========================================
-// DATABASE CONNECTION & SERVER START
+// MONGODB CONNECTION
 // ==========================================
 
 const connectDatabase = async () => {
   try {
-    const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/elmnsa_db';
-    
+    const mongoURI = process.env.MONGODB_URI;
+
+    console.log('🔄 Connecting to MongoDB...');
+
     await mongoose.connect(mongoURI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      maxPoolSize: 10,
-      minPoolSize: 5,
-      retryWrites: true,
-      w: 'majority',
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000
+      maxPoolSize: 50,
+      serverSelectionTimeoutMS: 5000, // Reduced from 10000 to fail faster
+      socketTimeoutMS: 45000,
     });
 
     console.log('✅ MongoDB connected successfully');
-    console.log(`📊 Database: ${mongoURI.split('/').pop().split('?')[0]}`);
+
+    // Seed access codes if database is empty
+    try {
+      const AccessCode = require('./models/AccessCode');
+      const count = await AccessCode.countDocuments();
+
+      if (count === 0) {
+        console.log('📊 Access codes not found. Checking environment for seed values...');
+
+        if (process.env.SEED_ACCESS_CODES) {
+          try {
+            const codes = JSON.parse(process.env.SEED_ACCESS_CODES);
+            if (Array.isArray(codes) && codes.length > 0) {
+              await AccessCode.insertMany(codes);
+              console.log(`✅ Seeded ${codes.length} access codes from SEED_ACCESS_CODES`);
+            } else {
+              console.warn('⚠️ SEED_ACCESS_CODES is present but not an array or is empty. Skipping seeding.');
+            }
+          } catch (e) {
+            console.error('❌ Failed to parse SEED_ACCESS_CODES. Skipping seeding.', e.message);
+          }
+        } else {
+          console.warn('⚠️ No SEED_ACCESS_CODES provided. Skipping seeding to avoid committing secrets.');
+        }
+      }
+    } catch (seedError) {
+      console.warn('⚠️  Could not seed access codes:', seedError.message);
+    }
+
     return true;
   } catch (error) {
-    console.error('❌ MongoDB connection FAILED:', error.message);
-    console.error('\n⚠️  PRODUCTION MODE REQUIRES VALID DATABASE CONNECTION!');
-    console.error('\n📋 Fix MongoDB Connection:');
-    console.error('   1. Go to: https://cloud.mongodb.com');
-    console.error('   2. Cluster: abdelraouf');
-    console.error('   3. Network Access: Add your IP (0.0.0.0/0 for development)');
-    console.error('   4. Verify MONGODB_URI in .env');
-    console.error('   5. Restart backend\n');
-    
-    // In production, FAIL - don't allow demo mode
-    if (process.env.NODE_ENV === 'production') {
-      console.error('❌ FATAL: Production requires valid MongoDB connection');
-      process.exit(1);
-    }
-    
-    // In development, give warning but allow to continue
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('⚠️  WARNING: Running in LIMITED mode (some features disabled)');
-      console.warn('ℹ️  Add MongoDB IP whitelist to enable full functionality\n');
-    }
-    
+    console.error('❌ MongoDB connection failed:', error.message);
+    console.error('⚠️  Application will continue without database');
     return false;
   }
 };
 
+// ==========================================
+// GRACEFUL SHUTDOWN
+// ==========================================
+
+const gracefulShutdown = async (signal) => {
+  console.log(`\n⚠️  Received ${signal}, shutting down gracefully...`);
+
+  server.close(async () => {
+    console.log('🛑 Server closed');
+
+    try {
+      await mongoose.disconnect();
+      console.log('🛑 MongoDB disconnected');
+    } catch (error) {
+      console.error('❌ Error disconnecting from MongoDB:', error);
+    }
+
+    process.exit(0);
+  });
+
+  // Force shutdown after 30 seconds
+  setTimeout(() => {
+    console.error('❌ Forced shutdown after timeout');
+    process.exit(1);
+  }, 30000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// ==========================================
+// UNHANDLED ERRORS
+// ==========================================
+
+process.on('unhandledRejection', (err) => {
+  console.error('❌ Unhandled Promise Rejection:', err);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  process.exit(1);
+});
+
+// ==========================================
+// START SERVER
+// ==========================================
+
+// ==========================================
+// CENTRALIZED ERROR HANDLING
+// ==========================================
+
+app.use((err, req, res, next) => {
+  console.error(`❌ [${new Date().toISOString()}] Error:`, err);
+
+  const statusCode = err.statusCode || 500;
+  const message = err.message || 'Internal Server Error';
+
+  // Hide stack trace in production
+  const response = {
+    success: false,
+    message: statusCode === 500 && NODE_ENV === 'production' ? 'Internal Server Error' : message,
+    ...(NODE_ENV !== 'production' && { stack: err.stack })
+  };
+
+  res.status(statusCode).json(response);
+});
+
 const startServer = async () => {
   try {
-    // Connect to database
-    await connectDatabase();
+    // Connect to database (non-blocking)
+    connectDatabase().catch(err => {
+      console.error('Database connection warning:', err.message);
+    });
 
-    // Start server
-    app.listen(PORT, () => {
+    // Start HTTP server with Socket.io
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`
 ╔════════════════════════════════════════════════════════╗
-║                  🚀 ELMNSA BACKEND                     ║
+║         🚀 PRODUCTION-READY BACKEND (RAILWAY)          ║
 ╠════════════════════════════════════════════════════════╣
-║ ✅ Server Running on Port: ${PORT}
-║ ✅ Environment: ${process.env.NODE_ENV || 'development'}
-║ ✅ Database: Connected
-║ ✅ CORS: ${process.env.CORS_ORIGIN || 'http://localhost:8000'}
-║ ✅ API Health: http://localhost:${PORT}/api/health
+║ ✅ Server running on: 0.0.0.0:${PORT}
+║ ✅ Environment: ${NODE_ENV}
+║ ✅ Socket.io: Enabled
+║ ✅ CORS Origin: ${process.env.CORS_ORIGIN || 'All origins'}
+║ ✅ Health check: GET http://localhost:${PORT}/
+║ ✅ Socket.io events: connection, authenticate, echo, broadcast
 ╚════════════════════════════════════════════════════════╝
       `);
+    });
+
+    // Handle listen errors
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use`);
+      } else {
+        console.error('❌ Server error:', err);
+      }
+      process.exit(1);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
@@ -271,19 +439,7 @@ const startServer = async () => {
   }
 };
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err) => {
-  console.error('❌ Unhandled Rejection:', err);
-  process.exit(1);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
-  process.exit(1);
-});
-
 // Start the server
 startServer();
 
-module.exports = app;
+module.exports = { app, server, io };

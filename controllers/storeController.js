@@ -134,6 +134,16 @@ exports.createOrder = async (req, res) => {
           error: 'PRODUCT_NOT_FOUND'
         });
       }
+
+      // Security Check: Positive Quantity
+      if (!item.quantity || item.quantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid quantity',
+          error: 'INVALID_QUANTITY'
+        });
+      }
+
       total += product.price * item.quantity;
     }
 

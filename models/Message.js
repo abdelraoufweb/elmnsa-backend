@@ -3,38 +3,40 @@
 // ==========================================
 
 const mongoose = require('mongoose');
-const { MESSAGE_TYPE } = require('../config/constants');
 
 const messageSchema = new mongoose.Schema({
-  // Conversation
+  // Conversation thread
   threadId: {
     type: String,
     required: true
   },
 
-  // Participants
+  // Sender
   fromId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
   },
-  fromName: String,
-  fromRole: String,
+  fromName: { type: String, default: '' },
+  fromRole: { type: String, default: '' },   // canonical role string: 'student' | 'admin' | 'assistant' | 'developer'
+
+  // Recipient
   toId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
   },
+  toRole: { type: String, default: '' },
 
   // Content
-  text: String,
+  text: { type: String, default: '' },
   type: {
     type: String,
-    enum: Object.values(MESSAGE_TYPE),
-    default: MESSAGE_TYPE.TEXT
+    enum: ['text', 'file', 'image', 'system'],
+    default: 'text'
   },
 
-  // File (if applicable)
+  // File attachment (optional)
   file: {
     name: String,
     size: Number,
@@ -48,19 +50,29 @@ const messageSchema = new mongoose.Schema({
     enum: ['sent', 'delivered', 'read'],
     default: 'sent'
   },
-  readAt: Date,
+  read: { type: Boolean, default: false },
+  readAt: { type: Date }
 
-  // Timestamps
-  createdAt: {
-    type: Date,
-    default: Date.now,
-    expires: 2592000 // Auto-delete after 30 days
-  }
-}, { timestamps: false });
+}, {
+  timestamps: true   // adds createdAt + updatedAt automatically
+});
 
-// Indexes
+// Auto-delete messages after 30 days
+messageSchema.index({ createdAt: 1 }, { expireAfterSeconds: 2592000 });
+
+// Query performance indexes
 messageSchema.index({ threadId: 1, createdAt: -1 });
 messageSchema.index({ fromId: 1 });
 messageSchema.index({ toId: 1 });
+messageSchema.index({ toId: 1, read: 1 });
+
+// Virtual to maintain backward-compatibility with code expecting `from` field
+messageSchema.virtual('from')
+  .get(function() {
+    return this.fromRole;
+  })
+  .set(function(value) {
+    this.fromRole = value;
+  });
 
 module.exports = mongoose.model('Message', messageSchema);

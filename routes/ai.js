@@ -4,16 +4,16 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, authorize } = require('../middleware/auth');
+const { authMiddleware, authorize } = require('../middleware/auth');
 const aiController = require('../controllers/aiController');
 
 // AI Routes
-router.post('/chat', authenticateToken, aiController.getResponse);
-router.post('/verify-access-code', authenticateToken, aiController.verifyAccessCode);
-router.post('/generate-access-code', authenticateToken, authorize('admin', 'developer'), aiController.generateAccessCode);
+router.post('/chat', authMiddleware, aiController.getResponse);
+router.post('/verify-access-code', authMiddleware, aiController.verifyAccessCode);
+router.post('/generate-access-code', authMiddleware, authorize('admin', 'developer'), aiController.generateAccessCode);
 
 // Conversation History
-router.get('/conversation-history', authenticateToken, aiController.getConversationHistory);
-router.delete('/clear-conversation', authenticateToken, aiController.clearConversation);
+router.get('/conversation-history', authMiddleware, aiController.getConversationHistory);
+router.delete('/clear-conversation', authMiddleware, aiController.clearConversation);
 
 module.exports = router;

@@ -5,42 +5,38 @@
 const express = require('express');
 const router = express.Router();
 const { authMiddleware } = require('../middleware/auth');
-const messageController = require('../controllers/messageController');
+const ctrl = require('../controllers/messageController');
 
-// Send message
-/**
- * POST /api/messages/send
- */
-router.post('/send', authMiddleware, messageController.sendMessage);
+// ── Send a message ────────────────────────
+// POST /api/messages/send
+router.post('/send', authMiddleware, ctrl.sendMessage);
 
-// Get all messages with filtering
-/**
- * GET /api/messages?threadId=chat:studentId&page=1&limit=20
- */
-router.get('/', authMiddleware, messageController.getMessages);
+// ── Unread count (must be BEFORE /:threadId) ──
+// GET /api/messages/unread/count
+router.get('/unread/count', authMiddleware, ctrl.getUnreadCount);
 
-// Get unread count
-/**
- * GET /api/messages/unread/count
- */
-router.get('/unread/count', authMiddleware, messageController.getUnreadCount);
+// ── All threads (staff: admin/assistant/developer) ──
+// GET /api/messages/threads
+router.get('/threads', authMiddleware, ctrl.getAllThreads);
 
-// Get thread messages
-/**
- * GET /api/messages/:threadId
- */
-router.get('/:threadId', authMiddleware, messageController.getThreadMessages);
+// ── Get all messages (with optional ?threadId=) ──
+// GET /api/messages
+router.get('/', authMiddleware, ctrl.getMessages);
 
-// Mark message as read
-/**
- * PUT /api/messages/:messageId/read
- */
-router.put('/:messageId/read', authMiddleware, messageController.markAsRead);
+// ── Get single thread messages ────────────
+// GET /api/messages/:threadId
+router.get('/:threadId', authMiddleware, ctrl.getThreadMessages);
 
-// Delete message
-/**
- * DELETE /api/messages/:messageId
- */
-router.delete('/:messageId', authMiddleware, messageController.deleteMessage);
+// ── Mark single message as read ───────────
+// PUT /api/messages/:messageId/read
+router.put('/:messageId/read', authMiddleware, ctrl.markAsRead);
+
+// ── Mark entire thread as read ────────────
+// PUT /api/messages/thread/:threadId/read-all
+router.put('/thread/:threadId/read-all', authMiddleware, ctrl.markThreadAsRead);
+
+// ── Delete message ────────────────────────
+// DELETE /api/messages/:messageId
+router.delete('/:messageId', authMiddleware, ctrl.deleteMessage);
 
 module.exports = router;

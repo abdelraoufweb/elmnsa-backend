@@ -40,6 +40,10 @@ const homeworkSchema = new mongoose.Schema({
     default: Date.now
   },
 
+  // Correction
+  correctedFileUrl: String,
+
+
   // Grading
   grade: String, // A+, B, 90%, etc
   feedback: String,

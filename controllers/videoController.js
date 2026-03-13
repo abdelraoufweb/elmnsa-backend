@@ -1,10 +1,75 @@
-// ==========================================
-// VIDEO CONTROLLER
-// ==========================================
-
 const Video = require('../models/Video');
 const AccessCode = require('../models/AccessCode');
 const User = require('../models/User');
+const VideoProgress = require('../models/VideoProgress');
+const { validateFileContent } = require('../utils/fileValidators');
+const { uploadFile, deleteFileFromR2 } = require('../services/s3Service');
+const { deleteFile } = require('../middleware/fileUpload');
+
+// ============================================
+// PROGRESS ENDPOINTS
+// ============================================
+
+/**
+ * Save video progress
+ * POST /api/videos/:videoId/progress
+ */
+exports.saveProgress = async (req, res) => {
+  try {
+    const { progress, completed } = req.body;
+    const { videoId } = req.params;
+
+    if (progress === undefined) {
+      return res.status(400).json({ success: false, message: 'Progress is required' });
+    }
+
+    // Validate progress numeric and in range 0-100 (percentage)
+    const parsedProgress = Number(progress);
+    if (Number.isNaN(parsedProgress) || parsedProgress < 0 || parsedProgress > 100) {
+      return res.status(400).json({ success: false, message: 'Invalid progress: must be a number between 0 and 100' });
+    }
+
+    const videoProgress = await VideoProgress.findOneAndUpdate(
+      { user: req.user.id, video: videoId },
+      {
+        $set: {
+          progress: parsedProgress,
+          lastWatched: Date.now(),
+          ...(typeof completed !== 'undefined' && { completed: Boolean(completed) })
+        }
+      },
+      { new: true, upsert: true }
+    );
+
+    res.status(200).json({ success: true, data: videoProgress });
+  } catch (error) {
+    console.error('Save progress error:', error);
+    res.status(500).json({ success: false, message: 'Failed to save progress' });
+  }
+};
+
+/**
+ * Get video progress
+ * GET /api/videos/:videoId/progress
+ */
+exports.getProgress = async (req, res) => {
+  try {
+    const { videoId } = req.params;
+
+    const videoProgress = await VideoProgress.findOne({
+      user: req.user.id,
+      video: videoId
+    });
+
+    res.status(200).json({
+      success: true,
+      data: videoProgress || { progress: 0, completed: false }
+    });
+  } catch (error) {
+    console.error('Get progress error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch progress' });
+  }
+};
 
 // ============================================
 // PUBLIC ENDPOINTS
@@ -31,10 +96,38 @@ exports.listVideos = async (req, res) => {
       .populate('createdBy', 'firstName lastName role')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(parseInt(limit));
+      .limit(parseInt(limit))
+      .lean();
 
     // Count total
     const total = await Video.countDocuments(query);
+
+    // Sanitize for students without access
+    if (req.user && req.user.role === 'student' && !req.user.videoAccessUnlocked) {
+      // Convert to plain objects and remove sensitive fields
+      const sanitizedVideos = videos.map(v => {
+        // If video is public, don't sanitize its URLs
+        if (v.isPublic) return v;
+
+        const video = { ...v };
+        delete video.mp4Url;
+        delete video.mp4Path;
+        delete video.youtubeUrl;
+        delete video.youtubeId;
+        return video;
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: sanitizedVideos,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / limit)
+        }
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -72,9 +165,16 @@ exports.getVideo = async (req, res) => {
       });
     }
 
-    // Increment views
-    video.views = (video.views || 0) + 1;
-    await video.save();
+    // Authorization check for students (guard in case req.user is not present)
+    if (req.user?.role === 'student' && !req.user?.videoAccessUnlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Please purchase video access to view this content.'
+      });
+    }
+
+    // Atomic increment views (fix race condition)
+    await Video.findByIdAndUpdate(req.params.videoId, { $inc: { views: 1 } });
 
     res.status(200).json({
       success: true,
@@ -100,7 +200,7 @@ exports.getVideo = async (req, res) => {
  */
 exports.createVideo = async (req, res) => {
   try {
-    const { title, description, youtubeUrl, mp4Url, curriculum, grade, supportedQualities, defaultQuality } = req.body;
+    const { title, description, youtubeUrl, mp4Url, curriculum, grade, supportedQualities, defaultQuality, isPublic } = req.body;
 
     // Authorization
     const allowedRoles = ['admin', 'assistant', 'developer'];
@@ -139,6 +239,7 @@ exports.createVideo = async (req, res) => {
       defaultQuality: defaultQuality || '720p',
       createdBy: req.user.id,
       createdByRole: req.user.role,
+      isPublic: isPublic === true || isPublic === 'true',
       status: 'published'
     });
 
@@ -187,8 +288,8 @@ exports.uploadMP4 = async (req, res) => {
       });
     }
 
-    // Authorization - only creator or admin can upload
-    if (video.createdBy.toString() !== req.user.id && req.user.role !== 'admin') {
+    // Authorization - only creator, admin, or developer can upload
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to upload for this video'
@@ -203,17 +304,36 @@ exports.uploadMP4 = async (req, res) => {
       });
     }
 
-    // Store file path
-    video.mp4Path = req.file.path;
-    video.mp4Url = `/uploads/videos/${req.file.filename}`;
+    // MAGIC BYTE VALIDATION
+    const isValidFile = await validateFileContent(req.file.path, 'video/mp4');
+    if (!isValidFile) {
+      const fs = require('fs');
+      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file content (spoofed extension detected)',
+        error: 'INVALID_FILE_CONTENT'
+      });
+    }
+
+    // UPLOAD TO CLOUDFLARE R2
+    console.log('📤 Uploading to Cloudflare R2...');
+    const r2Url = await uploadFile(req.file, 'videos');
+    console.log('✅ Uploaded to R2:', r2Url);
+
+    // Update database
+    video.mp4Url = r2Url;
+    video.mp4Path = null; // We don't need local path anymore
+    video.status = 'published';
+    video.updatedAt = new Date();
     await video.save();
 
     res.status(200).json({
       success: true,
-      message: 'MP4 uploaded successfully',
+      message: 'MP4 uploaded to Cloud Storage successfully',
       data: {
-        mp4Url: video.mp4Url,
-        fileSize: req.file.size
+        mp4Url: video.mp4Url
       }
     });
   } catch (error) {
@@ -242,7 +362,7 @@ exports.updateVideo = async (req, res) => {
     }
 
     // Authorization
-    if (video.createdBy.toString() !== req.user.id && req.user.role !== 'admin') {
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to edit this video'
@@ -250,7 +370,7 @@ exports.updateVideo = async (req, res) => {
     }
 
     // Update fields
-    const { title, description, youtubeUrl, mp4Url, curriculum, grade, status } = req.body;
+    const { title, description, youtubeUrl, mp4Url, curriculum, grade, status, isPublic } = req.body;
 
     if (title) video.title = title;
     if (description) video.description = description;
@@ -260,6 +380,9 @@ exports.updateVideo = async (req, res) => {
     if (grade) video.grade = parseInt(grade);
     if (status && ['draft', 'published', 'archived'].includes(status)) {
       video.status = status;
+    }
+    if (typeof isPublic !== 'undefined') {
+      video.isPublic = isPublic === true || isPublic === 'true';
     }
 
     await video.save();
@@ -295,18 +418,26 @@ exports.deleteVideo = async (req, res) => {
     }
 
     // Authorization
-    if (video.createdBy.toString() !== req.user.id && req.user.role !== 'admin') {
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to delete this video'
       });
     }
 
+    // DELETE FROM STORAGE (R2 OR LOCAL)
+    if (video.mp4Url) {
+      await deleteFile(video.mp4Url);
+    }
+    if (video.mp4Path) {
+      await deleteFile(video.mp4Path);
+    }
+
     await Video.findByIdAndDelete(req.params.videoId);
 
     res.status(200).json({
       success: true,
-      message: 'Video deleted successfully'
+      message: 'Video and associated files deleted successfully'
     });
   } catch (error) {
     console.error('Delete video error:', error);

@@ -31,6 +31,22 @@ router.post('/verify', accessController.verifyAccessCode);
  */
 router.post('/validate-token', accessController.validateToken);
 
+/**
+ * Create test access code (Development only)
+ * POST /api/access/create-test
+ * Creates a test access code for development/testing
+ * 
+ * Body: {
+ *   code: "TEST123",
+ *   type: "student",
+ *   role: "student",
+ *   redirectTo: "/dashboard"
+ * }
+ */
+if (process.env.NODE_ENV === 'development') {
+  router.post('/create-test', accessController.createTestAccessCode);
+}
+
 // ============================================
 // PROTECTED ENDPOINTS (Admin/Developer only)
 // ============================================
