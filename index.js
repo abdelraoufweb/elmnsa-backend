@@ -59,6 +59,7 @@ console.log('✅ Environment variables validated');
 // ==========================================
 
 const app = express();
+app.set('trust proxy', 1); // Trust first proxy (Railway load balancer)
 
 // ==========================================
 // HTTP SERVER (RAILWAY COMPATIBLE)
@@ -71,9 +72,18 @@ const server = http.createServer(app);
 // ==========================================
 
 // Reuse the same origins configuration used by Express CORS
-const allowedOrigins = NODE_ENV === 'production'
-  ? (process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : []) // Fallback to empty (safe) in production
-  : true;
+const defaultOrigins = [
+  'https://elraouf.netlify.app',
+  'https://airy-miracle-production.up.railway.app',
+  'https://elmnsa-backend-production.up.railway.app',
+  'http://localhost:8000',
+  'http://localhost:5000',
+  'http://localhost:3000'
+];
+
+const allowedOrigins = process.env.CORS_ORIGIN 
+  ? process.env.CORS_ORIGIN.split(',') 
+  : defaultOrigins;
 
 const io = new Server(server, {
   cors: {
@@ -147,20 +157,39 @@ app.use(hpp());
 // RATE LIMITING MIDDLEWARE
 // ==========================================
 
+// Helper to get a unique key for each client (User or IP)
+const getClientKey = (req) => {
+  // 1. Try to use User ID from Authorization header (if present)
+  // This ensures authenticated users are tracked individually even if they share an IP
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader; // Use token as a unique key for the session
+  }
+
+  // 2. Fallback to IP address, with explicit handling for Railway's proxy
+  // Note: app.set('trust proxy', 1) is already set above, but this adds extra safety
+  return req.headers['x-forwarded-for'] || req.ip || 'global_fallback';
+};
+
 // General API limiter
 const limiter = rateLimit({
   windowMs: (parseInt(process.env.RATE_LIMIT_WINDOW) || 15) * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 500 to 1000 for better UX
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Too many requests, please try again later.' }
+  keyGenerator: getClientKey, // Use our custom key generator
+  message: { success: false, message: 'Too many requests from this user, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS', // Don't limit pre-flight requests
 });
 
 // Stricter limiter for auth routes
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Limit each IP to 20 login/register requests per window
-  message: { success: false, message: 'Too many login attempts, please try again after 15 minutes.' }
+  max: 30, // Increased from 20 to 30 to allow for some accidental retries
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip, // Auth routes usually don't have tokens yet
+  message: { success: false, message: 'Too many login attempts from this IP, please try again after 15 minutes.' }
 });
 
 app.use('/api/auth/login', authLimiter);
@@ -403,10 +432,18 @@ app.use((err, req, res, next) => {
 
 const startServer = async () => {
   try {
-    // Connect to database (non-blocking)
-    connectDatabase().catch(err => {
-      console.error('Database connection warning:', err.message);
+    // Connect to database (MUST await to prevent "bufferCommands=false" errors)
+    console.log('🔄 Awaiting database connection...');
+    const dbConnected = await connectDatabase().catch(err => {
+      console.error('❌ Database connection error:', err.message);
+      return false;
     });
+
+    if (!dbConnected && NODE_ENV === 'production') {
+      console.error('❌ FATAL: Could not connect to database in production. Exiting process.');
+      process.exit(1);
+    }
+    console.log('✅ Database state confirmed');
 
     // Start HTTP server with Socket.io
     server.listen(PORT, '0.0.0.0', () => {
