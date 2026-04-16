@@ -4,6 +4,7 @@
 
 const axios = require('axios');
 const AccessCode = require('../models/AccessCode');
+const User = require('../models/User');
 
 /**
  * Get AI response using Groq API
@@ -13,7 +14,65 @@ const AccessCode = require('../models/AccessCode');
  */
 exports.getResponse = async (req, res) => {
   try {
-    const { message, historyArr = [], accessCode } = req.body;
+    const { message, historyArr = [] } = req.body;
+    const userId = req.user._id;
+
+    // 🔑 [ACCESS CODE REDEMPTION VIA CHAT]: Check if user is sending a new code to unlock access
+    if (message && message.length >= 4 && message.length <= 20) {
+      const trimmedCode = message.trim();
+      // Look for a valid AI code matching the message
+      const potentialCode = await AccessCode.findOne({ code: trimmedCode, type: 'ai', active: true });
+      const now = new Date();
+      
+      if (potentialCode && (!potentialCode.expiryDate || potentialCode.expiryDate > now)) {
+        console.log(`🔑 [AI] Access code ${trimmedCode} redeemed via chat by user ${userId}.`);
+        
+        // Unlock access for this user in DB
+        await User.findByIdAndUpdate(userId, { 
+          aiAccessUnlocked: true, 
+          aiAccessCode: trimmedCode 
+        });
+
+        // Update usage tracking
+        potentialCode.currentUsers = (potentialCode.currentUsers || 0) + 1;
+        await potentialCode.save();
+
+        return res.status(200).json({
+          success: true,
+          data: { 
+            response: `✅ **تم تفعيل اشتراك الـ AI بنجاح!** 🎉\n\nكود الاشتراك: \`${trimmedCode}\` تم قبوله. يمكنك الآن البدء في طرح أسئلتك وسأقوم بمساعدتك فوراً.`, 
+            provider: 'system', 
+            timestamp: new Date() 
+          }
+        });
+      }
+    }
+
+    // 🔒 [REVOCATION FIX]: Verify AI Access is still valid
+    if (req.user.role === 'student') {
+      const user = await User.findById(userId);
+      if (!user.aiAccessUnlocked || !user.aiAccessCode) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'AI access is locked. Please enter a valid access code by typing it here in the chat.' 
+        });
+      }
+
+      const accessCode = await AccessCode.findOne({ code: user.aiAccessCode, type: 'ai', active: true });
+      const now = new Date();
+      
+      if (!accessCode || (accessCode.expiryDate && accessCode.expiryDate < now)) {
+        console.warn(`🔒 [AI] Revoking access for user ${userId} - Code ${user.aiAccessCode} is invalid/expired/disabled.`);
+        
+        // Revoke in DB
+        await User.findByIdAndUpdate(userId, { aiAccessUnlocked: false });
+        
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Your AI access code has been disabled, deleted, or expired. Please type a NEW access code here to continue.' 
+        });
+      }
+    }
 
     if (!message) {
       return res.status(400).json({ success: false, message: 'Message is required' });
@@ -38,6 +97,9 @@ exports.getResponse = async (req, res) => {
     } catch (groqErr) {
       const isQuotaError = groqErr.response?.status === 429 || groqErr.message.includes('quota') || groqErr.message.includes('limit');
       console.warn(`⚠️ [AI] Groq failed${isQuotaError ? ' (Quota Reached)' : ''}:`, groqErr.message);
+      if (groqErr.response) {
+        console.warn('📡 [AI] Groq Error Data:', JSON.stringify(groqErr.response.data, null, 2));
+      }
 
       if (!isQuotaError && !process.env.GEMINI_API_KEY) {
         throw groqErr; // If not quota and no fallback, throw it
@@ -56,6 +118,9 @@ exports.getResponse = async (req, res) => {
         });
       } catch (geminiErr) {
         console.error('❌ [AI] Gemini Fallback also failed:', geminiErr.message);
+        if (geminiErr.response) {
+            console.error('📡 [AI] Gemini Error Data:', JSON.stringify(geminiErr.response.data, null, 2));
+        }
         throw geminiErr;
       }
     }
@@ -77,7 +142,7 @@ exports.getResponse = async (req, res) => {
  */
 async function callGroq(message, history, systemPrompt) {
   const apiKey = process.env.GROQ_API_KEY;
-  const model = process.env.GROQ_MODEL || 'mixtral-8x7b-32768';
+  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
   const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
     model: model,
@@ -107,8 +172,8 @@ async function callGroq(message, history, systemPrompt) {
  */
 async function callGemini(message, history, systemPrompt) {
   const apiKey = process.env.GEMINI_API_KEY;
-  // Gemini 1.5 Flash is fast and free for most uses
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Gemini 2.0 Flash is fast and modern
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
   // Convert histories to Gemini format
   const contents = history.map(h => ({
@@ -142,20 +207,22 @@ async function callGemini(message, history, systemPrompt) {
  */
 exports.generateAccessCode = async (req, res) => {
   try {
-    const { duration } = req.body;
-
-    // Generate random 6-character code
-    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const { duration, code: customCode, maxUses } = req.body;
+    
+    // Allow custom code or generate random 6-character code
+    const code = customCode || Math.random().toString(36).substring(2, 8).toUpperCase();
 
     let expiresAt = null;
     if (duration) {
-      expiresAt = new Date(Date.now() + duration * 60 * 1000);
+      expiresAt = new Date(Date.now() + Number(duration) * 60 * 1000);
     }
 
     const accessCode = new AccessCode({
       code,
+      type: 'ai',        // 🎯 REQUIRED: Identification for AI-specific codes
+      role: 'student',   // 🎯 REQUIRED: Target role for redeeming
       createdBy: req.user._id,
-      expiresAt
+      expiryDate: expiresAt // 🎯 MATCH: Use expiryDate in model
     });
 
     await accessCode.save();
@@ -165,7 +232,7 @@ exports.generateAccessCode = async (req, res) => {
       message: 'Access code generated successfully',
       data: {
         code,
-        expiresAt
+        expiryDate: expiresAt
       }
     });
   } catch (error) {
@@ -178,11 +245,12 @@ exports.generateAccessCode = async (req, res) => {
 };
 
 /**
- * Verify access code
+ * Verify access code (AI-specific)
  */
 exports.verifyAccessCode = async (req, res) => {
   try {
     const { code } = req.body;
+    const User = require('../models/User');
 
     if (!code) {
       return res.status(400).json({
@@ -191,7 +259,12 @@ exports.verifyAccessCode = async (req, res) => {
       });
     }
 
-    const accessCode = await AccessCode.findOne({ code });
+    // ✅ Filter by type='ai' and active=true
+    const accessCode = await AccessCode.findOne({ 
+      code: code.trim(),
+      type: 'ai',
+      active: true
+    });
 
     if (!accessCode) {
       return res.status(404).json({
@@ -200,22 +273,54 @@ exports.verifyAccessCode = async (req, res) => {
       });
     }
 
-    if (accessCode.expiresAt && accessCode.expiresAt < new Date()) {
+    if (accessCode.expiryDate && accessCode.expiryDate < new Date()) {
       return res.status(403).json({
         success: false,
         message: 'Access code has expired'
       });
     }
 
+    // ✅ Check max users limit
+    if (accessCode.maxUsers && accessCode.currentUsers >= accessCode.maxUsers) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access code usage limit reached'
+      });
+    }
+
+    // ✅ Track usage
+    if (!accessCode.usageByUser) {
+      accessCode.usageByUser = new Map();
+    }
+    const userId = req.user._id.toString();
+    const existingUsage = accessCode.usageByUser.get(userId);
+    if (!existingUsage) {
+      accessCode.usageByUser.set(userId, { views: 1, unlockedAt: new Date() });
+      accessCode.currentUsers = (accessCode.currentUsers || 0) + 1;
+    } else {
+      existingUsage.views = (existingUsage.views || 0) + 1;
+      accessCode.usageByUser.set(userId, existingUsage);
+    }
+    await accessCode.save();
+
+    // ✅ Update user's aiAccessUnlocked in database
+    await User.findByIdAndUpdate(req.user._id, {
+      aiAccessUnlocked: true,
+      aiAccessCode: code.trim()
+    });
+
+    console.log(`✅ [AI] Access code verified for user ${req.user._id}`);
+
     res.status(200).json({
       success: true,
-      message: 'Access code is valid',
+      message: 'AI access unlocked',
       data: {
         isValid: true,
-        expiresAt: accessCode.expiresAt
+        expiresAt: accessCode.expiryDate
       }
     });
   } catch (error) {
+    console.error('❌ [AI] Access code error:', error);
     res.status(500).json({
       success: false,
       message: 'Error verifying access code',

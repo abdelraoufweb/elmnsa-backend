@@ -56,41 +56,41 @@ router.get('/:videoId', authMiddleware, videoController.getVideo);
  * POST /api/videos
  * Allowed roles: admin, assistant, developer
  */
-router.post('/', authMiddleware, videoController.createVideo);
+router.post('/', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.createVideo);
 
 /**
  * Update video
  * PUT /api/videos/:videoId
  * Creator or Admin only
  */
-router.put('/:videoId', authMiddleware, videoController.updateVideo);
+router.put('/:videoId', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.updateVideo);
 
 /**
  * Delete video
  * DELETE /api/videos/:videoId
  * Creator or Admin only
  */
-router.delete('/:videoId', authMiddleware, videoController.deleteVideo);
+router.delete('/:videoId', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.deleteVideo);
 
 /**
  * Upload MP4 file
  * POST /api/videos/:videoId/upload-mp4
  * Content-Type: multipart/form-data
  */
-router.post('/:videoId/upload-mp4', authMiddleware, upload.single('file'), videoController.uploadMP4);
+router.post('/:videoId/upload-mp4', authMiddleware, authorize(['admin', 'assistant', 'developer']), upload.single('file'), videoController.uploadMP4);
 
 /**
  * Create access codes for video
  * POST /api/videos/:videoId/access-codes
  */
-router.post('/:videoId/access-codes', authMiddleware, videoController.createAccessCodes);
+router.post('/:videoId/access-codes', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.createAccessCodes);
 
 /**
  * Get access codes for video
  * GET /api/videos/:videoId/access-codes
  * Admin or Developer only
  */
-router.get('/:videoId/access-codes', authMiddleware, videoController.getAccessCodes);
+router.get('/:videoId/access-codes', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.getAccessCodes);
 
 /**
  * Get video progress

@@ -81,12 +81,33 @@ exports.getProgress = async (req, res) => {
  */
 exports.listVideos = async (req, res) => {
   try {
-    const { grade, curriculum, page = 1, limit = 10 } = req.query;
+    const { grade, curriculum, page = 1, limit = 10000 } = req.query;
 
     // Build query
     const query = { status: 'published' };
-    if (grade) query.grade = parseInt(grade);
-    if (curriculum) query.curriculum = curriculum;
+    
+    // 🎯 ENFORCE GRADE/CURRICULUM FILTERING FOR STUDENTS
+    // This ensures students only see content for their specific stage
+    if (req.user && req.user.role === 'student') {
+      // Use req.user.grade if available, ensure it's a Number
+      if (req.user.grade !== undefined && req.user.grade !== null) {
+        query.grade = Number(req.user.grade);
+      }
+      
+      // Use req.user.curriculum if available
+      if (req.user.curriculum) {
+        query.curriculum = req.user.curriculum;
+      }
+      
+      console.log(`🔒 [VIDEOS] Enforcing student filters for ${req.user.firstName}: Grade ${query.grade}, Curriculum ${query.curriculum}`);
+    } else {
+      // Admins/Assistants/Developers can use query parameters
+      if (grade) {
+        const parsedGrade = parseInt(grade);
+        if (!isNaN(parsedGrade)) query.grade = parsedGrade;
+      }
+      if (curriculum) query.curriculum = curriculum;
+    }
 
     // Pagination
     const skip = (page - 1) * limit;
@@ -252,6 +273,21 @@ exports.createVideo = async (req, res) => {
 
     await video.save();
 
+    // ── Notify Group ──────────
+    const notificationService = require('../services/notificationService');
+    notificationService.notifyGroup(
+      { grade: video.grade, curriculum: video.curriculum },
+      {
+        title: 'فيديو جديد متاح! 🎥',
+        message: `تم رفع فيديو جديد: ${video.title}`,
+        type: 'video',
+        refId: video._id,
+        url: '/student-videos',
+        notifyParent: true // User requested parents get these too
+      },
+      req.io
+    );
+
     res.status(201).json({
       success: true,
       message: 'Video created successfully',
@@ -288,8 +324,8 @@ exports.uploadMP4 = async (req, res) => {
       });
     }
 
-    // Authorization - only creator, admin, or developer can upload
-    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
+    // Authorization - only creator, admin, developer, or assistant can upload
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to upload for this video'
@@ -362,7 +398,7 @@ exports.updateVideo = async (req, res) => {
     }
 
     // Authorization
-    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to edit this video'
@@ -418,7 +454,7 @@ exports.deleteVideo = async (req, res) => {
     }
 
     // Authorization
-    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer'].includes(req.user.role)) {
+    if (video.createdBy.toString() !== req.user.id && !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized to delete this video'
@@ -517,10 +553,10 @@ exports.createAccessCodes = async (req, res) => {
 exports.getAccessCodes = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can view access codes'
+        message: 'Only admin, developer, or assistant can view access codes'
       });
     }
 

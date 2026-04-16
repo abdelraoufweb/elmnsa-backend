@@ -17,10 +17,10 @@ const roleHierarchy = { 'student': 1, 'parent': 1, 'assistant': 2, 'admin': 3, '
 exports.getDashboard = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can access dashboard'
+        message: 'Only admin, developer, or assistant can access dashboard'
       });
     }
 
@@ -70,10 +70,10 @@ exports.getDashboard = async (req, res) => {
 exports.getSecurityLogs = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can view logs'
+        message: 'Only admin, developer, or assistant can view logs'
       });
     }
 
@@ -217,10 +217,10 @@ exports.getAllStudents = async (req, res) => {
 exports.rejectAccount = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can reject accounts'
+        message: 'Only admin, developer, or assistant can reject accounts'
       });
     }
 
@@ -333,10 +333,10 @@ exports.rejectAccount = async (req, res) => {
 exports.approveAccount = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can approve accounts'
+        message: 'Only admin, developer, or assistant can approve accounts'
       });
     }
 
@@ -384,9 +384,16 @@ exports.approveAccount = async (req, res) => {
     // Update status
     user.status = 'approved';
     user.approvedAt = new Date();
-    user.approvedBy = req.user.id;
+    
+    // Format the approver's name (e.g., arwa1517 -> arwa)
+    let rawIdentifier = req.user.assistantCode || req.user.firstName || 'Admin';
+    // Remove numbers and special symbols, keep only letters (English/Arabic)
+    let cleanName = rawIdentifier.replace(/[^a-zA-Z\u0600-\u06FF\s]/g, '').trim();
+    if (!cleanName) cleanName = 'Admin';
 
-    console.log(`💾 Saving user with new status: approved`);
+    user.approvedBy = cleanName;
+
+    console.log(`💾 Saving user with new status: approved by ${cleanName}`);
     const savedUser = await user.save();
     console.log(`✅ User saved successfully. New status: ${savedUser.status}`);
 
@@ -437,10 +444,10 @@ exports.approveAccount = async (req, res) => {
 exports.blockUser = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can block users'
+        message: 'Only admin, developer, or assistant can block users'
       });
     }
 
@@ -537,10 +544,10 @@ exports.blockUser = async (req, res) => {
 exports.unblockUser = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can unblock users'
+        message: 'Only admin, developer, or assistant can unblock users'
       });
     }
 
@@ -640,10 +647,10 @@ exports.unblockUser = async (req, res) => {
 exports.deleteUser = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can delete users'
+        message: 'Only admin, developer, or assistant can delete users'
       });
     }
 
@@ -719,10 +726,10 @@ exports.deleteUser = async (req, res) => {
 exports.suspendUser = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can suspend users'
+        message: 'Only admin, developer, or assistant can suspend users'
       });
     }
 
@@ -827,10 +834,10 @@ exports.suspendUser = async (req, res) => {
 exports.unsuspendUser = async (req, res) => {
   try {
     // Authorization
-    if (!['admin', 'developer'].includes(req.user.role)) {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can unsuspend users'
+        message: 'Only admin, developer, or assistant can unsuspend users'
       });
     }
 

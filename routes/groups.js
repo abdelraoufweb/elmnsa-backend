@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const GroupChat = require('../models/GroupChat');
-const { authMiddleware } = require('../middleware/auth');
+const { authMiddleware, authorize } = require('../middleware/auth');
 const { ObjectId } = require('mongoose').Types;
 
-router.post('/create', authMiddleware, async (req, res) => {
+router.post('/create', authMiddleware, authorize(['admin', 'assistant', 'developer']), async (req, res) => {
   try {
     const { name, description, type } = req.body;
     if (!name || name.length < 3) return res.status(400).json({ error: 'Name required' });

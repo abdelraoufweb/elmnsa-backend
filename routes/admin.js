@@ -25,7 +25,7 @@ router.get('/pending-accounts', authMiddleware, authorize(['admin', 'developer',
  * @body    userId - user ID to approve
  * @access  Private (Admin, Developer)
  */
-router.post('/approve-account', authMiddleware, authorize(['admin', 'developer']), adminController.approveAccount);
+router.post('/approve-account', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.approveAccount);
 
 /**
  * @route   POST /api/admin/reject-account
@@ -33,7 +33,7 @@ router.post('/approve-account', authMiddleware, authorize(['admin', 'developer']
  * @body    userId - user ID to reject
  * @access  Private (Admin, Developer)
  */
-router.post('/reject-account', authMiddleware, authorize(['admin', 'developer']), adminController.rejectAccount);
+router.post('/reject-account', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.rejectAccount);
 
 /**
  * @route   POST /api/admin/block-user
@@ -42,7 +42,7 @@ router.post('/reject-account', authMiddleware, authorize(['admin', 'developer'])
  * @body    reason - reason for blocking (optional)
  * @access  Private (Admin, Developer)
  */
-router.post('/block-user', authMiddleware, authorize(['admin', 'developer']), adminController.blockUser);
+router.post('/block-user', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.blockUser);
 
 /**
  * @route   POST /api/admin/unblock-user
@@ -50,7 +50,7 @@ router.post('/block-user', authMiddleware, authorize(['admin', 'developer']), ad
  * @body    userId - user ID to unblock
  * @access  Private (Admin, Developer)
  */
-router.post('/unblock-user', authMiddleware, authorize(['admin', 'developer']), adminController.unblockUser);
+router.post('/unblock-user', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.unblockUser);
 
 /**
  * @route   POST /api/admin/suspend-user
@@ -59,7 +59,7 @@ router.post('/unblock-user', authMiddleware, authorize(['admin', 'developer']), 
  * @body    reason - reason for suspension (optional)
  * @access  Private (Admin, Developer)
  */
-router.post('/suspend-user', authMiddleware, authorize(['admin', 'developer']), adminController.suspendUser);
+router.post('/suspend-user', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.suspendUser);
 
 /**
  * @route   POST /api/admin/unsuspend-user
@@ -67,7 +67,7 @@ router.post('/suspend-user', authMiddleware, authorize(['admin', 'developer']), 
  * @body    userId - user ID to unsuspend
  * @access  Private (Admin, Developer)
  */
-router.post('/unsuspend-user', authMiddleware, authorize(['admin', 'developer']), adminController.unsuspendUser);
+router.post('/unsuspend-user', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.unsuspendUser);
 
 /**
  * @route   POST /api/admin/delete-user
@@ -75,6 +75,6 @@ router.post('/unsuspend-user', authMiddleware, authorize(['admin', 'developer'])
  * @body    userId - user ID to delete
  * @access  Private (Admin, Developer)
  */
-router.post('/delete-user', authMiddleware, authorize(['admin', 'developer']), adminController.deleteUser);
+router.post('/delete-user', authMiddleware, authorize(['admin', 'developer', 'assistant']), adminController.deleteUser);
 
 module.exports = router;

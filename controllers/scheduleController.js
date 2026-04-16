@@ -5,6 +5,7 @@
 const Schedule = require('../models/Schedule');
 const User = require('../models/User');
 const mongoose = require('mongoose');
+const notificationService = require('../services/notificationService');
 
 // Get all schedules
 exports.getSchedules = async (req, res) => {
@@ -114,16 +115,20 @@ exports.createSchedule = async (req, res) => {
 
         await schedule.save();
 
-        // ── Notify relevant students via Socket.IO ──────────
-        if (req.io && schedule.status === 'sent') {
-            const room = `student:target:${schedule.grade}:${schedule.curriculum}`;
-            req.io.to(room).emit('notification:schedule', {
-                title,
-                dateTime: schedule.dateTime,
-                timestamp: new Date().toISOString()
-            });
-            // Also notify staff
-            req.io.to('role:staff').emit('notification:schedule', { title, grade, curriculum });
+        // ── Notify relevant students & parents via NotificationService ──────────
+        if (schedule.status === 'sent') {
+            notificationService.notifyGroup(
+                { grade: schedule.grade, curriculum: schedule.curriculum },
+                {
+                    title: 'موعد حصة جديد! 🗓️',
+                    message: `تم تحديد موعد حصة جديد: ${title} بتاريخ ${new Date(dateTime).toLocaleDateString('ar-EG')}`,
+                    type: 'schedule',
+                    refId: schedule._id,
+                    url: '/student-schedules',
+                    notifyParent: true // User requested parents get these too
+                },
+                req.io
+            );
         }
 
         res.status(201).json({
@@ -162,16 +167,20 @@ exports.updateSchedule = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Schedule not found' });
         }
 
-        // ── Notify relevant students if status changed to sent ──────────
-        if (req.io && updateData.status === 'sent') {
-            const room = `student:target:${schedule.grade}:${schedule.curriculum}`;
-            req.io.to(room).emit('notification:schedule', {
-                title: schedule.title,
-                dateTime: schedule.dateTime,
-                timestamp: new Date().toISOString()
-            });
-            // Also notify staff
-            req.io.to('role:staff').emit('notification:schedule', { title: schedule.title, grade: schedule.grade, curriculum: schedule.curriculum });
+        // ── Notify relevant students & parents if status changed to sent ──────────
+        if (updateData.status === 'sent') {
+            notificationService.notifyGroup(
+                { grade: schedule.grade, curriculum: schedule.curriculum },
+                {
+                    title: 'موعد حصة جديد! 🗓️',
+                    message: `تم تحديث موعد الحصة: ${schedule.title}`,
+                    type: 'schedule',
+                    refId: schedule._id,
+                    url: '/student-schedules',
+                    notifyParent: true
+                },
+                req.io
+            );
         }
 
         res.status(200).json({

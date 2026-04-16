@@ -155,7 +155,7 @@ const setupSocketHandlers = (io) => {
         // Send to recipient
         const recipientSocket = activeUsers.get(toId);
         if (recipientSocket) {
-          io.to(recipientSocket).emit('message:receive', message);
+          io.to(recipientSocket).emit('new_message', message);
         }
 
         socket.emit('message:sent', message);

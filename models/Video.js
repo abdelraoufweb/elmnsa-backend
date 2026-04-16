@@ -130,7 +130,7 @@ videoSchema.pre('save', function (next) {
     }
   }
 
-  next(); س
+  next();
 });
 
 // Calculate average rating

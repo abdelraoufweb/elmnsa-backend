@@ -19,14 +19,19 @@ const homeworkSchema = new mongoose.Schema({
   // File Info
   fileName: {
     type: String,
-    required: true
+    required: false
   },
   fileSize: Number,
   fileType: String,
   fileUrl: {
     type: String,
-    required: true
+    required: false
   },
+  isOffline: {
+    type: Boolean,
+    default: false
+  },
+  title: String,
 
   // Submission
   notes: String,

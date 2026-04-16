@@ -352,12 +352,18 @@ exports.getAccessCodes = async (req, res) => {
       });
     }
 
-    const { type, active = true, page = 1, limit = 20 } = req.query;
+    const { type, active, page = 1, limit = 20 } = req.query;
 
     // Build query
     const query = {};
     if (type) query.type = type;
-    if (active !== undefined) query.active = active === 'true';
+    
+    // Default to active=true unless explicitly requested otherwise
+    if (active !== undefined) {
+      query.active = active === 'true';
+    } else {
+      query.active = true;
+    }
 
     // Pagination
     const skip = (page - 1) * limit;
@@ -510,5 +516,28 @@ exports.createTestAccessCode = async (req, res) => {
       message: 'Failed to create test access code',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  }
+};
+/**
+ * Delete access code (Admin/Developer only)
+ * DELETE /api/access/codes/:codeId
+ */
+exports.deleteAccessCode = async (req, res) => {
+  try {
+    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
+    }
+
+    const { codeId } = req.params;
+    const deleted = await AccessCode.findByIdAndDelete(codeId);
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Access code not found' });
+    }
+
+    res.status(200).json({ success: true, message: 'Access code deleted successfully' });
+  } catch (error) {
+    console.error('Delete access code error:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete access code' });
   }
 };

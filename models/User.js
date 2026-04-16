@@ -31,6 +31,15 @@ const userSchema = new mongoose.Schema({
     required: true,
     select: false
   },
+  pushSubscriptions: [{
+    endpoint: String,
+    keys: {
+      p256dh: String,
+      auth: String
+    },
+    deviceType: String,
+    _id: false
+  }],
 
   // Role & Status
   role: {

@@ -80,5 +80,6 @@ router.get('/codes', authMiddleware, accessController.getAccessCodes);
  * Protected - admin/developer only
  */
 router.patch('/codes/:codeId/disable', authMiddleware, accessController.disableAccessCode);
+router.delete('/codes/:codeId', authMiddleware, accessController.deleteAccessCode);
 
 module.exports = router;

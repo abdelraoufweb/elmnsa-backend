@@ -25,6 +25,9 @@ router.delete('/worksheets/:id', authMiddleware, authorize(['admin', 'assistant'
 // Upload homework (Student)
 router.post('/homework', authMiddleware, uploadHomework.single('file'), studentController.uploadHomework);
 
+// Add offline grades (Admin/Assistant/Developer)
+router.post('/homework/offline', authMiddleware, authorize(['admin', 'assistant', 'developer']), studentController.addOfflineGrades);
+
 // List homework (Publicly accessible with auth, scoping handled in controller)
 router.get('/homework', authMiddleware, studentController.listHomework);
 
@@ -46,40 +49,22 @@ router.put('/profile', authMiddleware, studentController.updateProfile);
 // STUDENT MANAGEMENT ROUTES
 
 // List all students (Admin/Assistant/Developer only)
-/**
- * GET /api/students?grade=10&curriculum=american&status=approved&page=1&limit=20
- */
-router.get('/', authMiddleware, studentController.listStudents);
+router.get('/', authMiddleware, authorize(['admin', 'assistant', 'developer']), studentController.listStudents);
 
 // Get student details
-/**
- * GET /api/students/:studentId
- */
-router.get('/:studentId', authMiddleware, studentController.getStudent);
+router.get('/:studentId', authMiddleware, authorize(['admin', 'assistant', 'developer']), studentController.getStudent);
 
 // Update student (Admin/Assistant/Developer only)
-/**
- * PUT /api/students/:studentId
- */
-router.put('/:studentId', authMiddleware, studentController.updateStudent);
+router.put('/:studentId', authMiddleware, authorize(['admin', 'assistant', 'developer']), studentController.updateStudent);
 
 // Delete student (Admin/Developer only)
-/**
- * DELETE /api/students/:studentId
- */
-router.delete('/:studentId', authMiddleware, studentController.deleteStudent);
+router.delete('/:studentId', authMiddleware, authorize(['admin', 'developer']), studentController.deleteStudent);
 
 // Approve student (Admin/Developer only)
-/**
- * POST /api/students/:studentId/approve
- */
-router.post('/:studentId/approve', authMiddleware, studentController.approveStudent);
+router.post('/:studentId/approve', authMiddleware, authorize(['admin', 'developer']), studentController.approveStudent);
 
 // Block student (Admin/Developer only)
-/**
- * POST /api/students/:studentId/block
- */
-router.post('/:studentId/block', authMiddleware, studentController.blockStudent);
+router.post('/:studentId/block', authMiddleware, authorize(['admin', 'developer']), studentController.blockStudent);
 
 // Apply theme to student
 /**

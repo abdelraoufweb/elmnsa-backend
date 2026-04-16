@@ -256,6 +256,7 @@ const accessRoutes = require('./routes/access');
 const groupRoutes = require('./routes/groups');
 const announcementRoutes = require('./routes/announcement');
 const scheduleRoutes = require('./routes/schedule');
+const notificationRoutes = require('./routes/notifications');
 
 
 // ==========================================
@@ -275,6 +276,7 @@ app.use('/api/access', accessRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/schedules', scheduleRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.use('/api/profile-requests', require('./routes/profileRequests'));
 app.use('/api/live-sessions', require('./routes/live-sessions'));

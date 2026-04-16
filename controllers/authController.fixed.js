@@ -153,6 +153,15 @@ exports.register = async (req, res) => {
       });
     }
 
+    // ✅ NEW: Enforce unique phone numbers for student and parent
+    if (parentPhone && digitsOnly === parentPhone.replace(/\D/g, '')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Student and parent phone numbers cannot be the same',
+        errors: { parentPhone: 'Must be different from student phone number' }
+      });
+    }
+
     // Enforce Password Strength
     const passwordCheck = validatePasswordStrength(password);
     if (!passwordCheck.valid) {
@@ -478,6 +487,7 @@ exports.login = async (req, res) => {
         role: user.role,
         status: user.status,
         grade: user.grade,
+        aiAccessUnlocked: user.aiAccessUnlocked || false, // 💡 PERSISTENCE: Return lock status to frontend
         deviceStatus,
         isNewDevice,
         requiresApproval
@@ -962,7 +972,9 @@ exports.getUserStatus = async (req, res) => {
         success: true,
         data: {
           id: userId,
+          role: req.user?.role || (userIdStr === '000000000000000000000001' ? 'developer' : 'student'),
           status: 'approved',
+          themeName: 'default',
           blockedReason: null,
           blockedAt: null,
           blockedBy: null,
@@ -972,9 +984,9 @@ exports.getUserStatus = async (req, res) => {
       });
     }
 
-    // ✅ Validate if userId is a valid MongoDB ObjectId format
-    if (!userId || typeof userId !== 'string' || !/^[0-9a-fA-F]{24}$/.test(userId)) {
-      console.error('❌ Invalid user ID format:', userId);
+    // ✅ Validate if userIdStr is a valid MongoDB ObjectId format
+    if (!userIdStr || !/^[0-9a-fA-F]{24}$/.test(userIdStr)) {
+      console.error('❌ Invalid user ID format:', userIdStr);
       return res.status(400).json({
         success: false,
         message: 'Invalid user ID format',
@@ -982,7 +994,7 @@ exports.getUserStatus = async (req, res) => {
       });
     }
 
-    const user = await User.findById(userId).select('status blockedReason blockedAt blockedBy suspensionReason suspendedAt');
+    const user = await User.findById(userId).select('status role blockedReason blockedAt blockedBy suspensionReason suspendedAt');
 
     if (!user) {
       return res.status(404).json({
@@ -991,11 +1003,17 @@ exports.getUserStatus = async (req, res) => {
       });
     }
 
+    // 🎨 Get user theme if available
+    const Theme = require('../models/Theme');
+    const theme = await Theme.findOne({ userId: user._id });
+
     return res.json({
       success: true,
       data: {
         id: user._id,
+        role: user.role, // 🔑 [PERSISTENCE FIX]: Return role to frontend
         status: user.status,
+        themeName: theme ? theme.themeName : 'default', // 🎨 Return theme preference
         blockedReason: user.blockedReason || null,
         blockedAt: user.blockedAt || null,
         blockedBy: user.blockedBy || null,

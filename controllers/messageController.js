@@ -148,8 +148,23 @@ exports.sendMessage = async (req, res) => {
     };
 
     if (req.io) {
-      // Emit only to the thread room to avoid global broadcasts
+      // Emit to the thread room
       req.io.to(resolvedThreadId).emit('new_message', payload);
+      // Also emit to recipient's personal room for real-time notifications
+      req.io.to(`notifications:${recipientId}`).emit('new_message', payload);
+
+      // ── NEW: Web Push for Assistant Replies ──
+      const isStaffReply = ['admin', 'assistant', 'developer'].includes(req.user.role) && recipient.role === 'student';
+      if (isStaffReply) {
+        const notificationService = require('../services/notificationService');
+        notificationService.notifyUser(recipientId, {
+          title: 'رد جديد من المساعد! 💬',
+          message: `تم الرد على استفسارك: ${message.text.substring(0, 30)}...`,
+          type: 'assistant_reply',
+          refId: message._id,
+          url: '/student-chat'
+        }, null); // Don't pass IO here as it was already handled by Socket.io above
+      }
     }
 
     return res.status(201).json({
