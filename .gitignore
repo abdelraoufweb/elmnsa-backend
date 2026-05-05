@@ -5,7 +5,6 @@
 
 # Dependencies
 node_modules/
-package-lock.json
 
 # Logs
 logs/
@@ -34,3 +33,6 @@ coverage/
 # Temp
 temp/
 tmp/
+
+# WhatsApp Auth
+.wwebjs_auth/
