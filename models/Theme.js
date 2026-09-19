@@ -23,7 +23,8 @@ const themeSchema = new mongoose.Schema({
       'theme-ocean',
       'theme-sunset',
       'theme-purple',
-      'theme-forest'
+      'theme-forest',
+      'assistant-theme'
     ],
     default: 'theme-dark'
   },
@@ -36,7 +37,7 @@ const themeSchema = new mongoose.Schema({
   },
   appliedByRole: {
     type: String,
-    enum: ['admin', 'developer', 'user'],
+    enum: ['admin', 'developer', 'assistant', 'student', 'user'],
     default: 'user'
   },
 

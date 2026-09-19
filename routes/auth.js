@@ -4,8 +4,9 @@
 
 const express = require('express');
 const router = express.Router();
-const authController = require('../controllers/authController.fixed');
+const authController = require('../controllers/authController');
 const { authMiddleware, authorize } = require('../middleware/auth');
+const { verifyCaptcha } = require('../middleware/captcha');
 
 // Public Routes (No authentication required)
 
@@ -13,13 +14,15 @@ const { authMiddleware, authorize } = require('../middleware/auth');
  * Register new student
  * POST /api/auth/register
  */
-router.post('/register', authController.register);
+// ✅ CAPTCHA applied: prevents automated mass registration
+router.post('/register', verifyCaptcha, authController.register);
 
 /**
  * Login
  * POST /api/auth/login
  */
-router.post('/login', authController.login);
+// ✅ CAPTCHA applied: blocks automated brute-force login attacks
+router.post('/login', verifyCaptcha, authController.login);
 
 /**
  * Verify access code
@@ -85,5 +88,46 @@ router.get('/approved-users', authMiddleware, authorize(['admin', 'assistant', '
  * GET /api/auth/status
  */
 router.get('/status', authMiddleware, authController.getUserStatus);
+
+// ==========================================
+// PASSWORD RESET & COMBINATION LOCK ROUTES
+// ==========================================
+
+/**
+ * Request password reset (sends OTP via WhatsApp)
+ * POST /api/auth/request-password-reset
+ */
+// ✅ CAPTCHA applied: prevents automated password reset enumeration
+router.post('/request-password-reset', verifyCaptcha, authController.requestPasswordReset);
+
+/**
+ * Verify OTP for password reset
+ * POST /api/auth/verify-reset-otp
+ */
+router.post('/verify-reset-otp', authController.verifyResetOtp);
+
+/**
+ * Fallback verification (parent phone + full name)
+ * POST /api/auth/verify-reset-fallback
+ */
+router.post('/verify-reset-fallback', authController.verifyResetFallback);
+
+/**
+ * Reset password with reset token
+ * POST /api/auth/reset-password
+ */
+router.post('/reset-password', authController.resetPassword);
+
+/**
+ * Setup combination lock code (requires auth)
+ * POST /api/auth/setup-lock
+ */
+router.post('/setup-lock', authMiddleware, authController.setupLockCode);
+
+/**
+ * Login with combination lock code (public)
+ * POST /api/auth/login-with-lock
+ */
+router.post('/login-with-lock', authController.loginWithLock);
 
 module.exports = router;

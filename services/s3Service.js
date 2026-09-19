@@ -50,6 +50,15 @@ exports.uploadFile = async (file, folder = 'general') => {
         return publicUrl;
     } catch (error) {
         console.error('R2 Upload Error:', error);
+        // Delete local file in case of upload failure to prevent leaks
+        if (file && file.path && fs.existsSync(file.path)) {
+            try {
+                fs.unlinkSync(file.path);
+                console.log(`🧹 Cleaned up local temp file after upload failure: ${file.path}`);
+            } catch (unlinkErr) {
+                console.error('Failed to delete local temp file after upload failure:', unlinkErr.message);
+            }
+        }
         throw new Error('Failed to upload file to storage');
     }
 };

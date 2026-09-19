@@ -3,7 +3,7 @@
 // ==========================================
 
 const { v4: uuidv4 } = require('uuid');
-const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 /**
  * Generate Unique ID
@@ -50,17 +50,18 @@ const generateAccessCode = (length = 8) => {
 };
 
 /**
- * Hash Password
+ * Hash Password using bcrypt
  */
-const hashPassword = (password) => {
-  return crypto.createHash('sha256').update(password).digest('hex');
+const hashPassword = async (password) => {
+  const saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
+  return bcrypt.hash(password, saltRounds);
 };
 
 /**
- * Verify Password
+ * Verify Password using bcrypt
  */
-const verifyPassword = (password, hash) => {
-  return hashPassword(password) === hash;
+const verifyPassword = async (password, hash) => {
+  return bcrypt.compare(password, hash);
 };
 
 /**

@@ -3,6 +3,7 @@
 // ==========================================
 
 const mongoose = require('mongoose');
+const secondaryDb = require('../services/secondaryDb');
 
 const securityLogSchema = new mongoose.Schema({
   type: {
@@ -53,4 +54,4 @@ securityLogSchema.index({ type: 1 });
 securityLogSchema.index({ severity: 1 });
 securityLogSchema.index({ createdAt: -1 });
 
-module.exports = mongoose.model('SecurityLog', securityLogSchema);
+module.exports = secondaryDb.model('SecurityLog', securityLogSchema);

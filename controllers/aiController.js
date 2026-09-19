@@ -5,6 +5,9 @@
 const axios = require('axios');
 const AccessCode = require('../models/AccessCode');
 const User = require('../models/User');
+const KnowledgeFile = require('../models/KnowledgeFile');
+// Built-in https for ElevenLabs streaming
+const https = require('https');
 
 /**
  * Get AI response using Groq API
@@ -25,6 +28,14 @@ exports.getResponse = async (req, res) => {
       const now = new Date();
       
       if (potentialCode && (!potentialCode.expiryDate || potentialCode.expiryDate > now)) {
+        const existingUsage = potentialCode.usageByUser?.get(userId.toString());
+        if (!existingUsage && potentialCode.maxUsers && potentialCode.currentUsers >= potentialCode.maxUsers) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access code usage limit reached'
+          });
+        }
+
         console.log(`🔑 [AI] Access code ${trimmedCode} redeemed via chat by user ${userId}.`);
         
         // Unlock access for this user in DB
@@ -33,8 +44,15 @@ exports.getResponse = async (req, res) => {
           aiAccessCode: trimmedCode 
         });
 
-        // Update usage tracking
-        potentialCode.currentUsers = (potentialCode.currentUsers || 0) + 1;
+        // Update usage tracking without double-counting the same student
+        if (!potentialCode.usageByUser) potentialCode.usageByUser = new Map();
+        if (!existingUsage) {
+          potentialCode.usageByUser.set(userId.toString(), { views: 1, unlockedAt: new Date() });
+          potentialCode.currentUsers = (potentialCode.currentUsers || 0) + 1;
+        } else {
+          existingUsage.views = (existingUsage.views || 0) + 1;
+          potentialCode.usageByUser.set(userId.toString(), existingUsage);
+        }
         await potentialCode.save();
 
         return res.status(200).json({
@@ -80,48 +98,47 @@ exports.getResponse = async (req, res) => {
 
     // 1️⃣ PREPARE HISTORY
     const history = Array.isArray(historyArr) ? historyArr : [];
-    const systemPrompt = "You are a helpful Mathematics Assistant. You solve algebra, geometry, calculus, and other math problems step-by-step.";
+    const systemPrompt = await buildSystemPrompt(req.user);
 
     console.log(`🤖 [AI] Request from user ${req.user?._id || 'anonymous'}`);
 
-    // 2️⃣ TRY GROQ (PRIMARY)
+    // 2️⃣ TRY GEMINI (PRIMARY)
     try {
-      if (process.env.GROQ_API_KEY) {
-        console.log('📡 [AI] Attempting Groq...');
-        const groqResult = await callGroq(message, history, systemPrompt);
-        return res.status(200).json({
-          success: true,
-          data: { response: groqResult, provider: 'groq', timestamp: new Date() }
-        });
-      }
-    } catch (groqErr) {
-      const isQuotaError = groqErr.response?.status === 429 || groqErr.message.includes('quota') || groqErr.message.includes('limit');
-      console.warn(`⚠️ [AI] Groq failed${isQuotaError ? ' (Quota Reached)' : ''}:`, groqErr.message);
-      if (groqErr.response) {
-        console.warn('📡 [AI] Groq Error Data:', JSON.stringify(groqErr.response.data, null, 2));
-      }
-
-      if (!isQuotaError && !process.env.GEMINI_API_KEY) {
-        throw groqErr; // If not quota and no fallback, throw it
-      }
-      // If quota reached or other error, continue to Gemini...
-    }
-
-    // 3️⃣ TRY GEMINI (FALLBACK)
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        console.log('📡 [AI] Attempting Gemini Fallback...');
+      if (process.env.GEMINI_API_KEY) {
+        console.log('📡 [AI] Attempting Gemini (Primary)...');
         const geminiResult = await callGemini(message, history, systemPrompt);
         return res.status(200).json({
           success: true,
           data: { response: geminiResult, provider: 'gemini', timestamp: new Date() }
         });
-      } catch (geminiErr) {
-        console.error('❌ [AI] Gemini Fallback also failed:', geminiErr.message);
-        if (geminiErr.response) {
-            console.error('📡 [AI] Gemini Error Data:', JSON.stringify(geminiErr.response.data, null, 2));
-        }
+      }
+    } catch (geminiErr) {
+      const isQuotaError = geminiErr.response?.status === 429 || geminiErr.message.includes('quota') || geminiErr.message.includes('limit');
+      console.warn(`⚠️ [AI] Gemini failed${isQuotaError ? ' (Quota Reached)' : ''}:`, geminiErr.message);
+      if (geminiErr.response) {
+        console.warn('📡 [AI] Gemini Error Data:', JSON.stringify(geminiErr.response.data, null, 2));
+      }
+
+      if (!isQuotaError && !process.env.GROQ_API_KEY) {
         throw geminiErr;
+      }
+    }
+
+    // 3️⃣ TRY GROQ (FALLBACK)
+    if (process.env.GROQ_API_KEY) {
+      try {
+        console.log('📡 [AI] Attempting Groq Fallback...');
+        const groqResult = await callGroq(message, history, systemPrompt);
+        return res.status(200).json({
+          success: true,
+          data: { response: groqResult, provider: 'groq', timestamp: new Date() }
+        });
+      } catch (groqErr) {
+        console.error('❌ [AI] Groq Fallback also failed:', groqErr.message);
+        if (groqErr.response) {
+            console.error('📡 [AI] Groq Error Data:', JSON.stringify(groqErr.response.data, null, 2));
+        }
+        throw groqErr;
       }
     }
 
@@ -202,12 +219,12 @@ async function callGemini(message, history, systemPrompt) {
   throw new Error('Gemini returned an empty response or unexpected format');
 }
 
-/**
+  /**
  * Generate access code
  */
 exports.generateAccessCode = async (req, res) => {
   try {
-    const { duration, code: customCode, maxUses } = req.body;
+    const { duration, code: customCode, maxUses, aiPermissions } = req.body;
     
     // Allow custom code or generate random 6-character code
     const code = customCode || Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -222,7 +239,9 @@ exports.generateAccessCode = async (req, res) => {
       type: 'ai',        // 🎯 REQUIRED: Identification for AI-specific codes
       role: 'student',   // 🎯 REQUIRED: Target role for redeeming
       createdBy: req.user._id,
-      expiryDate: expiresAt // 🎯 MATCH: Use expiryDate in model
+      maxUsers: maxUses ? Number(maxUses) : undefined,
+      expiryDate: expiresAt, // 🎯 MATCH: Use expiryDate in model
+      aiPermissions: aiPermissions || 'both'
     });
 
     await accessCode.save();
@@ -280,20 +299,19 @@ exports.verifyAccessCode = async (req, res) => {
       });
     }
 
-    // ✅ Check max users limit
-    if (accessCode.maxUsers && accessCode.currentUsers >= accessCode.maxUsers) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access code usage limit reached'
-      });
-    }
-
     // ✅ Track usage
     if (!accessCode.usageByUser) {
       accessCode.usageByUser = new Map();
     }
     const userId = req.user._id.toString();
     const existingUsage = accessCode.usageByUser.get(userId);
+    if (!existingUsage && accessCode.maxUsers && accessCode.currentUsers >= accessCode.maxUsers) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access code usage limit reached'
+      });
+    }
+
     if (!existingUsage) {
       accessCode.usageByUser.set(userId, { views: 1, unlockedAt: new Date() });
       accessCode.currentUsers = (accessCode.currentUsers || 0) + 1;
@@ -306,7 +324,8 @@ exports.verifyAccessCode = async (req, res) => {
     // ✅ Update user's aiAccessUnlocked in database
     await User.findByIdAndUpdate(req.user._id, {
       aiAccessUnlocked: true,
-      aiAccessCode: code.trim()
+      aiAccessCode: code.trim(),
+      aiPermissions: accessCode.aiPermissions || 'both'
     });
 
     console.log(`✅ [AI] Access code verified for user ${req.user._id}`);
@@ -326,6 +345,81 @@ exports.verifyAccessCode = async (req, res) => {
       message: 'Error verifying access code',
       error: error.message
     });
+  }
+};
+
+/**
+ * Get AI access status for current user
+ */
+exports.getAccessStatus = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Students need active access code
+    if (user.role === 'student') {
+      if (!user.aiAccessUnlocked || !user.aiAccessCode) {
+        return res.status(200).json({ success: true, data: { unlocked: false } });
+      }
+
+      const accessCode = await AccessCode.findOne({ code: user.aiAccessCode, type: 'ai', active: true });
+      const now = new Date();
+
+      if (!accessCode || (accessCode.expiryDate && accessCode.expiryDate < now)) {
+        // Auto-revoke expired access
+        await User.findByIdAndUpdate(user._id, { aiAccessUnlocked: false, aiAccessCode: null });
+        console.log(`🔒 [AI] Auto-revoked expired access for user ${user._id}`);
+        return res.status(200).json({ success: true, data: { unlocked: false } });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          unlocked: true,
+          code: user.aiAccessCode,
+          expiresAt: accessCode.expiryDate || null,
+          remainingDays: accessCode.expiryDate
+            ? Math.ceil((accessCode.expiryDate - now) / (1000 * 60 * 60 * 24))
+            : null
+        }
+      });
+    }
+
+    // Non-students (admin, dev, assistant) always have access
+    return res.status(200).json({ success: true, data: { unlocked: true } });
+
+  } catch (error) {
+    console.error('❌ [AI] Access status error:', error.message);
+    res.status(500).json({ success: false, message: 'Error checking access status' });
+  }
+};
+
+/**
+ * Revoke AI access for a student (admin/developer only)
+ */
+exports.revokeAccess = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ success: false, message: 'userId required' });
+
+    const student = await User.findById(userId);
+    if (!student || student.role !== 'student') {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const oldCode = student.aiAccessCode;
+    student.aiAccessUnlocked = false;
+    student.aiAccessCode = null;
+    await student.save();
+
+    console.log(`🔒 [AI] Developer revoked AI access for user ${userId} (code: ${oldCode})`);
+
+    res.status(200).json({ success: true, message: 'AI access revoked for student' });
+  } catch (error) {
+    console.error('❌ [AI] Revoke error:', error.message);
+    res.status(500).json({ success: false, message: 'Error revoking access' });
   }
 };
 
@@ -369,5 +463,159 @@ exports.clearConversation = async (req, res) => {
       message: 'Error clearing conversation',
       error: error.message
     });
+  }
+};
+
+async function buildSystemPrompt(authUser) {
+  const user = await User.findById(authUser._id).lean();
+  const userName = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Student';
+
+  const globalFiles = await KnowledgeFile.find({ isGlobal: true, active: true })
+    .select('title content lessonName lessonsList')
+    .lean();
+
+  let specificFiles = [];
+  if (user?.grade && user?.curriculum) {
+    specificFiles = await KnowledgeFile.find({
+      grade: Number(user.grade),
+      curriculum: user.curriculum,
+      isGlobal: false,
+      active: true
+    }).select('title content lessonName lessonsList').lean();
+  }
+
+  const contextParts = [];
+  if (globalFiles.length) {
+    contextParts.push('=== GLOBAL SKILLS / TEACHING RULES ===');
+    globalFiles.forEach(file => {
+      contextParts.push(formatKnowledgeFile(file));
+    });
+  }
+
+  if (specificFiles.length) {
+    contextParts.push(`=== STUDENT COURSE MATERIAL: GRADE ${user.grade} ${String(user.curriculum).toUpperCase()} ===`);
+    specificFiles.forEach(file => {
+      contextParts.push(formatKnowledgeFile(file));
+    });
+  }
+
+  const notes = Array.isArray(user?.aiNotes) && user.aiNotes.length
+    ? user.aiNotes.map(note => `- ${note}`).join('\n')
+    : 'No saved notes yet.';
+
+  const completed = Array.isArray(user?.aiCompletedLessons) && user.aiCompletedLessons.length
+    ? user.aiCompletedLessons.join(', ')
+    : 'None yet.';
+
+  return `You are "Raouf" (رؤوف), also called "Roufi" (روفي), an expert Math Teacher on the Abdelraouf platform.
+Speak in the same language the student uses, Arabic or English.
+Student: ${userName}
+Grade: ${user?.grade || 'unknown'}
+Curriculum: ${user?.curriculum || 'unknown'}
+
+Rules:
+- Only answer Mathematics and study questions related to Mathematics.
+- Use the uploaded teaching knowledge below as the primary source whenever it is relevant.
+- If the uploaded knowledge conflicts with your general knowledge, follow the uploaded knowledge.
+- Explain step by step, ask the student to use pen and paper for multi-step problems, and keep the tone friendly.
+- Do not invent lessons from the knowledge base. If a needed file is missing, say what is missing and continue with general math help.
+
+Student Notes:
+${notes}
+
+Completed Lessons:
+${completed}
+
+Uploaded Knowledge:
+${contextParts.join('\n\n') || 'No uploaded knowledge files are available for this student yet.'}`;
+}
+
+function formatKnowledgeFile(file) {
+  const lesson = file.lessonName ? ` | Lesson: ${file.lessonName}` : '';
+  const lessons = Array.isArray(file.lessonsList) && file.lessonsList.length
+    ? `\nAvailable lessons: ${file.lessonsList.join(', ')}`
+    : '';
+  return `--- ${file.title}${lesson} ---${lessons}\n${file.content}`;
+}
+
+// ==========================================
+// VOICE CHAT ENDPOINT (Gemini + ElevenLabs)
+// ==========================================
+
+// Key rotation state
+let _elevenLabsKeyIdx = 0;
+const _elevenLabsKeys = [
+  process.env.ELEVENLABS_API_KEY,
+].filter(Boolean);
+
+async function callElevenLabsTTS(text) {
+  const keys = _elevenLabsKeys.length ? _elevenLabsKeys : ['sk_00e8ba471cba78be96e87f4eb167ec7a71d55f50d9e44ee2'];
+  const voiceId = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJcg';
+  
+  for (let attempt = 0; attempt < keys.length; attempt++) {
+    const key = keys[_elevenLabsKeyIdx % keys.length];
+    try {
+      const res = await axios.post(
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+        {
+          text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+        },
+        {
+          headers: { 'xi-api-key': key, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
+          responseType: 'arraybuffer',
+          timeout: 20000
+        }
+      );
+      return res.data; // ArrayBuffer of mp3
+    } catch (err) {
+      const status = err.response?.status;
+      console.warn(`⚠️ [ElevenLabs] Key ${_elevenLabsKeyIdx} failed (${status}), rotating...`);
+      _elevenLabsKeyIdx = (_elevenLabsKeyIdx + 1) % keys.length;
+      if (attempt === keys.length - 1) throw err;
+    }
+  }
+}
+
+/**
+ * POST /api/ai/voice-chat
+ * Body: { text: string, history: array }
+ * Returns: audio/mpeg binary stream
+ */
+exports.voiceChat = async (req, res) => {
+  try {
+    const { text, history = [] } = req.body;
+    if (!text) return res.status(400).json({ success: false, message: 'text is required' });
+
+    // Build system prompt from the user's context
+    const systemPrompt = await buildSystemPrompt(req.user);
+    const voiceSystemPrompt = systemPrompt + '\n\nIMPORTANT: Keep your response concise and conversational (2-4 sentences max for voice). Do NOT use markdown, lists, or symbols.';
+
+    // 1. Get text reply from Gemini (with Groq fallback)
+    let replyText = '';
+    try {
+      replyText = await callGemini(text, history, voiceSystemPrompt);
+      console.log(`✅ [VoiceChat] Gemini OK (${replyText.length} chars)`);
+    } catch (geminiErr) {
+      console.warn('⚠️ [VoiceChat] Gemini failed, trying Groq...', geminiErr.message);
+      replyText = await callGroq(text, history, voiceSystemPrompt);
+      console.log(`✅ [VoiceChat] Groq OK (${replyText.length} chars)`);
+    }
+
+    // 2. Convert text to audio with ElevenLabs
+    const audioBuffer = await callElevenLabsTTS(replyText);
+
+    // 3. Send audio + text back to client
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'X-Voice-Text': Buffer.from(replyText.substring(0, 500)).toString('base64'), // first 500 chars for transcript
+      'Content-Length': audioBuffer.byteLength
+    });
+    res.send(Buffer.from(audioBuffer));
+
+  } catch (err) {
+    console.error('❌ [VoiceChat] Error:', err.message);
+    res.status(500).json({ success: false, message: 'Voice service error', error: err.message });
   }
 };

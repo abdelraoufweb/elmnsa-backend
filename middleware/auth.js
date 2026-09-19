@@ -73,14 +73,14 @@ const authMiddleware = async (req, res, next) => {
         // ID might not be a valid ObjectId (like 'access_...') but we handle it below
       }
 
-      console.log('⚡ [AUTH] Using temporary access-based user profile');
+      console.log('⚡ [AUTH] Using temporary access-based user profile with role:', decoded.role);
       req.user = {
         id: decoded.id,
         _id: decoded.id,
         role: decoded.role || 'guest',
         type: decoded.type || (decoded.id === '000000000000000000000001' ? 'access_code_verification' : null),
-        firstName: decoded.firstName || 'Staff',
-        lastName: 'Member',
+        firstName: decoded.firstName || 'Guest',
+        lastName: 'User',
         status: 'approved'
       };
       return next();
@@ -210,9 +210,17 @@ const checkPermission = (permission) => {
       return next();
     }
 
-    // Basic permission check - you can extend this with more detailed permissions
-    if (req.user.role === 'admin' || req.user.role === 'assistant') {
-      return next();
+    // Check if user object has the hasPermission method (from Mongoose model)
+    if (typeof req.user.hasPermission === 'function') {
+      if (req.user.hasPermission(permission)) {
+        return next();
+      }
+    } else {
+      // Fallback if not a Mongoose document (e.g. access_code users)
+      if (req.user.role === 'developer') return next();
+      const { PERMISSIONS } = require('../config/constants');
+      const rolePerms = PERMISSIONS[req.user.role] || [];
+      if (rolePerms.includes(permission)) return next();
     }
 
     return res.status(403).json({

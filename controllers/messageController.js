@@ -46,9 +46,12 @@ exports.sendMessage = async (req, res) => {
         }).skip(randomSkip).lean();
 
         if (!staff) {
-          return res.status(404).json({ success: false, message: 'No support agents available.' });
+          // Fallback: If no staff found in DB (e.g. testing), route to a generic ID 
+          // so the student can still send the message and admins can read it later.
+          recipientId = new mongoose.Types.ObjectId();
+        } else {
+          recipientId = staff._id;
         }
-        recipientId = staff._id;
 
       } else if (['admin', 'assistant', 'developer'].includes(req.user.role)) {
         // Staff → extract student from threadId  (format: "chat:<studentId>")
@@ -160,10 +163,35 @@ exports.sendMessage = async (req, res) => {
         notificationService.notifyUser(recipientId, {
           title: 'رد جديد من المساعد! 💬',
           message: `تم الرد على استفسارك: ${message.text.substring(0, 30)}...`,
-          type: 'assistant_reply',
+          type: 'chat',
           refId: message._id,
           url: '/student-chat'
         }, null); // Don't pass IO here as it was already handled by Socket.io above
+      }
+
+      // ── NEW: Web Push for Student Messages to Staff ──
+      const isStudentMessage = req.user.role === 'student' && ['admin', 'assistant', 'developer'].includes(recipient.role);
+      if (isStudentMessage) {
+        const notificationService = require('../services/notificationService');
+        // Notify the specific staff member
+        if (recipientId && mongoose.Types.ObjectId.isValid(recipientId)) {
+          notificationService.notifyUser(recipientId, {
+            title: 'رسالة جديدة من طالب! 💬',
+            message: `${req.user.firstName} ${req.user.lastName}: ${message.text.substring(0, 40)}...`,
+            type: 'chat',
+            refId: message._id,
+            url: '/admin-chat'
+          }, null);
+        }
+
+        // ── WhatsApp Alert: Student sent a chat message ──────────
+        try {
+          const whatsappService = require('../services/whatsappService');
+          const waMessage = `💬 *رسالة جديدة من طالب على المنصة*\n\n👤 ${req.user.firstName} ${req.user.lastName}\n📝 "${message.text.substring(0, 100)}${message.text.length > 100 ? '...' : ''}"\n\n🔔 الرجاء الرد من المنصة`;
+          whatsappService.notifyAllStaff(waMessage, 'chat_alert');
+        } catch (waErr) {
+          console.error('WhatsApp chat alert failed:', waErr);
+        }
       }
     }
 

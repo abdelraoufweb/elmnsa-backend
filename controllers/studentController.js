@@ -351,7 +351,7 @@ exports.applyTheme = async (req, res) => {
       });
     }
 
-    const validThemes = ['default', 'theme-dark', 'theme-light', 'theme-ocean', 'theme-sunset', 'theme-purple', 'theme-forest'];
+    const validThemes = ['default', 'theme-dark', 'theme-light', 'theme-ocean', 'theme-sunset', 'theme-purple', 'theme-forest', 'assistant-theme'];
     if (!validThemes.includes(themeName)) {
       return res.status(400).json({
         success: false,
@@ -499,6 +499,15 @@ exports.approveStudent = async (req, res) => {
     const verifyStudent = await User.findById(studentId);
     if (verifyStudent.status !== 'approved') {
       throw new Error('Verification failed: Student status not updated');
+    }
+
+    // ── WhatsApp Notification to student: approval ──────────
+    try {
+      const whatsappService = require('../services/whatsappService');
+      const waMessage = `✅ *مرحباً ${student.firstName}!*\n\nتم الموافقة على حسابك في المنصة التعليمية.\nيمكنك الآن تسجيل الدخول والبدء في استخدام المنصة.\n\n🎓 أهلاً وسهلاً بك!`;
+      whatsappService.notifyStudent(student, waMessage, 'approval');
+    } catch (waErr) {
+      console.error('WhatsApp notification on approval failed:', waErr);
     }
 
     res.status(200).json({
@@ -711,6 +720,34 @@ exports.uploadWorksheet = async (req, res) => {
         },
         req.io
       );
+
+      // ── WhatsApp Notification: New Worksheet to active students ──────────
+      try {
+        const whatsappService = require('../services/whatsappService');
+        const targetStudents = await User.find({
+          role: 'student',
+          status: 'approved',
+          grade: worksheet.grade,
+          curriculum: worksheet.curriculum
+        }).select('firstName lastName phoneNumber');
+
+        if (targetStudents.length > 0) {
+          const recipients = targetStudents.map(s => ({
+            phone: s.phoneNumber,
+            message: `📄 *شيت جديد متاح!*\n\n📝 ${worksheet.title}\n${worksheet.description ? `📖 ${worksheet.description}\n` : ''}\n✅ حمّل الشيت الآن من المنصة`,
+            logData: {
+              type: 'content',
+              studentId: s._id,
+              recipientName: `${s.firstName} ${s.lastName}`,
+              recipientType: 'student'
+            }
+          }));
+          whatsappService.sendBatch(recipients);
+          console.log(`📱 [WhatsApp] Queued ${recipients.length} worksheet notifications`);
+        }
+      } catch (waErr) {
+        console.error('WhatsApp notification for new worksheet failed:', waErr);
+      }
     }
 
     res.status(201).json({
@@ -855,6 +892,27 @@ exports.uploadHomework = async (req, res) => {
       });
     }
 
+    // ── Push Notification to all staff (Admin/Assistant/Developer) ──────────
+    try {
+      const User = require('../models/User');
+      const staffUsers = await User.find({
+        role: { $in: ['admin', 'assistant', 'developer'] },
+        status: 'approved'
+      }).select('_id');
+
+      for (const staff of staffUsers) {
+        notificationService.notifyUser(staff._id, {
+          title: 'واجب جديد مرفوع! 📝',
+          message: `${req.user.firstName} ${req.user.lastName} رفع واجب جديد`,
+          type: 'homework',
+          refId: homework._id,
+          url: '/admin-homework'
+        }, req.io);
+      }
+    } catch (pushErr) {
+      console.error('Push to staff failed:', pushErr);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Homework uploaded successfully',
@@ -963,6 +1021,27 @@ exports.gradeHomework = async (req, res) => {
       req.io
     );
 
+    // ── WhatsApp Notification to student & parent: grade ──────────
+    try {
+      const whatsappService = require('../services/whatsappService');
+      // Fetch the student by ID (NOT by name) for precise targeting
+      const gradedStudent = await User.findById(homework.studentId).select('firstName lastName phoneNumber parentPhone');
+      
+      if (gradedStudent) {
+        // Send to student
+        const studentMsg = `📝 *تم تصحيح الواجب*\n\nالدرجة: ${parsedGrade}%\n${feedback ? `الملاحظات: ${feedback}` : ''}\n\n✅ يمكنك مراجعة التفاصيل من المنصة`;
+        whatsappService.notifyStudent(gradedStudent, studentMsg, 'grade');
+
+        // Send to parent (if parentPhone exists)
+        if (gradedStudent.parentPhone) {
+          const parentMsg = `📝 *تنبيه ولي الأمر*\n\nابنك/ابنتك ${gradedStudent.firstName} ${gradedStudent.lastName} حصل على درجة ${parsedGrade}% في الواجب.\n${feedback ? `ملاحظات المعلم: ${feedback}` : ''}\n\n✅ يمكنك متابعة التفاصيل من المنصة`;
+          whatsappService.notifyParent(gradedStudent, parentMsg, 'grade');
+        }
+      }
+    } catch (waErr) {
+      console.error('WhatsApp notification on grading failed:', waErr);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Homework graded successfully',
@@ -1052,6 +1131,24 @@ exports.addOfflineGrades = async (req, res) => {
         },
         req.io
       );
+
+      // ── WhatsApp Notification to student & parent: offline grade ──────────
+      try {
+        const whatsappService = require('../services/whatsappService');
+        const studentForWa = await User.findById(student._id).select('firstName lastName phoneNumber parentPhone');
+        
+        if (studentForWa) {
+          const studentMsg = `📝 *تم إضافة درجة جديدة*\n\nالنشاط: ${title}\nالدرجة: ${grade}\n${feedback ? `الملاحظات: ${feedback}` : ''}\n\n✅ يمكنك مراجعة التفاصيل من المنصة`;
+          whatsappService.notifyStudent(studentForWa, studentMsg, 'grade');
+
+          if (studentForWa.parentPhone) {
+            const parentMsg = `📝 *تنبيه ولي الأمر*\n\nابنك/ابنتك ${studentForWa.firstName} ${studentForWa.lastName} حصل على درجة ${grade} في نشاط: ${title}\n${feedback ? `الملاحظات: ${feedback}` : ''}\n\n✅ يمكنك متابعة التفاصيل من المنصة`;
+            whatsappService.notifyParent(studentForWa, parentMsg, 'grade');
+          }
+        }
+      } catch (waErr) {
+        console.error('WhatsApp notification on offline grading failed:', waErr);
+      }
     }
 
     res.status(201).json({

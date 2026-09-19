@@ -110,11 +110,19 @@ module.exports = {
   NOTIFICATION_TYPE: {
     ANNOUNCEMENT: 'announcement',
     HOMEWORK: 'homework',
+    HOMEWORK_GRADED: 'homework_graded',
     SCHEDULE: 'schedule',
     CHAT: 'chat',
+    VIDEO: 'video',
+    WORKSHEET: 'worksheet',
     ORDER: 'order',
     LIVE_CLASS: 'live_class',
-    SYSTEM: 'system'
+    SYSTEM: 'system',
+    WHATSAPP_CONTENT: 'wa_content',
+    WHATSAPP_GRADE: 'wa_grade',
+    WHATSAPP_APPROVAL: 'wa_approval',
+    WHATSAPP_REGISTRATION: 'wa_registration',
+    WHATSAPP_REPORT: 'wa_report'
   },
 
   // Socket.IO Events
@@ -143,6 +151,10 @@ module.exports = {
     ORDER_STATUS_UPDATE: 'order_status_update',
 
     // Real-time updates
-    DATA_UPDATE: 'data_update'
+    DATA_UPDATE: 'data_update',
+
+    // WhatsApp
+    WHATSAPP_STATUS: 'whatsapp:status',
+    WHATSAPP_QR: 'whatsapp:qr'
   }
 };

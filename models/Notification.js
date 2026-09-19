@@ -3,6 +3,7 @@
 // ==========================================
 
 const mongoose = require('mongoose');
+const secondaryDb = require('../services/secondaryDb');
 const { NOTIFICATION_TYPE } = require('../config/constants');
 
 const notificationSchema = new mongoose.Schema({
@@ -55,4 +56,4 @@ const notificationSchema = new mongoose.Schema({
 notificationSchema.index({ recipientId: 1, createdAt: -1 });
 notificationSchema.index({ read: 1 });
 
-module.exports = mongoose.model('Notification', notificationSchema);
+module.exports = secondaryDb.model('Notification', notificationSchema);

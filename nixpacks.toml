@@ -1,0 +1,38 @@
+providers = ["node"]
+
+[phases.setup]
+nixPkgs = [
+  "chromium",
+  "glib",
+  "nss",
+  "nspr",
+  "at-spi2-atk",
+  "cups",
+  "dbus",
+  "dbus.lib",
+  "libdrm",
+  "mesa",
+  "pango",
+  "cairo",
+  "alsa-lib",
+  "libxkbcommon",
+  "xorg.libX11",
+  "xorg.libXcomposite",
+  "xorg.libXdamage",
+  "xorg.libXext",
+  "xorg.libXfixes",
+  "xorg.libXrandr",
+  "xorg.libxcb",
+  "xorg.libxshmfence"
+]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.start]
+cmd = "dbus-run-session node index.js"
+
+[variables]
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "false"
+PUPPETEER_SKIP_DOWNLOAD = "false"
+DBUS_SESSION_BUS_ADDRESS = "autolaunch:"

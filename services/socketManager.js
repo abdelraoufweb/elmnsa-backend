@@ -21,7 +21,76 @@ const socketMetadata = new Map();
 const MAX_CONCURRENT_USERS = 5000;
 const MAX_LIVE_SESSIONS = 500;
 
+// ✅ Per-socket rate limiter factory
+// Returns a function that returns true if the event is allowed, false if rate-limited.
+const createSocketRateLimiter = (maxEvents, windowMs) => {
+  // Map: socketId -> { count, resetAt }
+  const store = new Map();
+  return (socketId) => {
+    const now = Date.now();
+    const entry = store.get(socketId);
+    if (!entry || now > entry.resetAt) {
+      store.set(socketId, { count: 1, resetAt: now + windowMs });
+      return true; // allowed
+    }
+    if (entry.count >= maxEvents) {
+      return false; // rate-limited
+    }
+    entry.count++;
+    return true; // allowed
+  };
+};
+
+// Rate limiters for specific socket events
+const messageSendLimiter       = createSocketRateLimiter(30,  60 * 1000); // 30 messages/min
+const notificationSendLimiter  = createSocketRateLimiter(10,  60 * 1000); // 10 notifs/min
+
+// Recover active sessions from DB
+async function recoverActiveSessions() {
+  try {
+    const sessions = await LiveSession.find({ active: true }).lean();
+    sessions.forEach(s => {
+      activeLiveSessions.set(s.sessionCode, {
+        sessionId: s._id,
+        title: s.title,
+        audience: s.audience,
+        participants: s.participants.map(p => ({
+          userId: p.userId.toString(),
+          name: p.name,
+          role: p.role,
+          joinedAt: p.joinedAt,
+          socketId: null
+        }))
+      });
+    });
+    console.log(`✅ Recovered ${sessions.length} active sessions from DB`);
+  } catch (err) {
+    console.error('❌ Failed to recover sessions:', err.message);
+  }
+}
+
 const setupSocketHandlers = (io) => {
+  // Call recovery on setup
+  recoverActiveSessions();
+
+  // Heartbeat monitor: clean up sessions with no activity
+  setInterval(() => {
+    const now = Date.now();
+    for (const [code, session] of activeLiveSessions.entries()) {
+      if (session.participants.length === 0) {
+        // Only clean up if empty for 5 minutes
+        if (!session.lastEmptyAt) session.lastEmptyAt = now;
+        else if (now - session.lastEmptyAt > 5 * 60 * 1000) {
+          activeLiveSessions.delete(code);
+          LiveSession.findByIdAndUpdate(session.sessionId, { active: false, endedAt: new Date() }).catch(console.error);
+          console.log(`🧹 Cleaned up stale empty session: ${code}`);
+        }
+      } else {
+        session.lastEmptyAt = null;
+      }
+    }
+  }, 60 * 1000);
+
   // 🔐 SECURITY: JWT Authentication Middleware for Socket.IO
   io.use(async (socket, next) => {
     try {
@@ -102,6 +171,7 @@ const setupSocketHandlers = (io) => {
       socket.join('role:staff');
     }
     if (userRole === 'admin') socket.join('role:admin');
+    if (userRole === 'developer') socket.join('role:developer');
     if (userRole === 'student') socket.join('role:student');
 
     // Join specific curriculum/grade rooms if student
@@ -120,7 +190,8 @@ const setupSocketHandlers = (io) => {
     socket.on('user:online', async () => {
       // Logic for status notification (if needed - handled by connection usually)
       await User.findByIdAndUpdate(userId, { isOnline: true });
-      io.emit('user:status_changed', { userId, status: 'online' });
+      // Broadcast to staff only for status changes (performance)
+      io.to('role:staff').emit('user:status_changed', { userId, status: 'online' });
     });
 
     socket.on('user:offline', async (userId) => {
@@ -136,16 +207,38 @@ const setupSocketHandlers = (io) => {
     // ==========================================
 
     socket.on('message:send', async (data) => {
+      // ✅ Socket rate limiting — max 30 messages/min per connection
+      if (!messageSendLimiter(socket.id)) {
+        socket.emit('message:error', { error: 'You are sending messages too fast. Please slow down.' });
+        return;
+      }
+
       try {
-        const { fromId, toId, text, threadId } = data;
+        const { toId, text, threadId } = data;
+
+        // ✅ Validate text field is a plain string
+        if (!text || typeof text !== 'string' || !text.trim()) {
+          socket.emit('message:error', { error: 'Message text is required and must be a string.' });
+          return;
+        }
+        if (text.length > 5000) {
+          socket.emit('message:error', { error: 'Message too long. Maximum 5000 characters.' });
+          return;
+        }
+        if (!toId || typeof toId !== 'string') {
+          socket.emit('message:error', { error: 'Invalid recipient.' });
+          return;
+        }
+
+        const fromId = socket.user.id;
 
         const message = new Message({
           threadId: threadId || [fromId, toId].sort().join('-'),
           fromId,
-          fromName: data.fromName,
-          fromRole: data.fromRole,
+          fromName: `${socket.user.firstName || ''} ${socket.user.lastName || ''}`.trim() || 'User',
+          fromRole: socket.user.role,
           toId,
-          text,
+          text: text.trim(),
           type: 'text',
           status: 'sent'
         });
@@ -183,7 +276,9 @@ const setupSocketHandlers = (io) => {
     });
 
     socket.on('typing:start', (data) => {
-      const { fromId, toId, fromName } = data;
+      const { toId } = data;
+      const fromId = socket.user.id;
+      const fromName = `${socket.user.firstName || ''} ${socket.user.lastName || ''}`.trim() || 'User';
       const recipientSocket = activeUsers.get(toId);
       if (recipientSocket) {
         io.to(recipientSocket).emit('typing:indicator', { fromId, fromName });
@@ -191,7 +286,8 @@ const setupSocketHandlers = (io) => {
     });
 
     socket.on('typing:stop', (data) => {
-      const { fromId, toId } = data;
+      const { toId } = data;
+      const fromId = socket.user.id;
       const recipientSocket = activeUsers.get(toId);
       if (recipientSocket) {
         io.to(recipientSocket).emit('typing:stop', { fromId });
@@ -211,13 +307,35 @@ const setupSocketHandlers = (io) => {
     });
 
     socket.on('notification:send', async (data) => {
+      // ✅ Socket rate limiting — max 10 notifications/min per connection
+      if (!notificationSendLimiter(socket.id)) {
+        socket.emit('error', { error: 'Too many notifications. Please slow down.' });
+        return;
+      }
+
+      // ✅ Only staff roles can send notifications via socket
+      if (!['admin', 'assistant', 'developer'].includes(socket.user.role)) {
+        socket.emit('error', { error: 'Unauthorized to send notifications.' });
+        return;
+      }
+
       try {
         const { recipientId, title, message, type, refId } = data;
 
+        // ✅ Validate required fields are plain strings
+        if (!recipientId || typeof recipientId !== 'string') {
+          socket.emit('error', { error: 'Invalid recipientId.' });
+          return;
+        }
+        if (!title || typeof title !== 'string' || title.length > 200) {
+          socket.emit('error', { error: 'Invalid or missing notification title.' });
+          return;
+        }
+
         const notification = new Notification({
           recipientId,
-          title,
-          message,
+          title: title.trim(),
+          message: typeof message === 'string' ? message.trim() : '',
           type: type || 'system',
           refId
         });
@@ -231,24 +349,45 @@ const setupSocketHandlers = (io) => {
     });
 
     // ==========================================
+    // THEME CHANGED - Real-time sync
+    // ==========================================
+    socket.on('theme:changed', (data) => {
+      try {
+        const { userId, themeName } = data;
+        if (userId && themeName) {
+          // Broadcast to the specific user's room so all their tabs get it
+          socket.to(`notifications:${userId}`).emit('theme:changed', { userId, themeName, appliedBy: socket.user.id });
+          console.log(`🎨 Theme ${themeName} broadcast to user ${userId}`);
+        }
+      } catch (err) {
+        console.error('Error in theme:changed:', err);
+      }
+    });
+
+    // ==========================================
     // LIVE CLASS/CALL
     // ==========================================
 
     socket.on('live:create_session', async (data) => {
       try {
-        const { hostId, title, audience } = data;
-        console.log(`📡 Request to create live session: "${title}" by Host: ${hostId}`);
+        const { title, audience, code } = data;
 
-        if (!hostId) {
-          throw new Error('Host ID is missing in request');
+        // Use authenticated user from socket (verified by JWT middleware)
+        const hostId = socket.user.id;
+        const hostRole = socket.user.role;
+
+        // Only staff can create sessions
+        if (!['admin', 'assistant', 'developer', 'teacher'].includes(hostRole)) {
+          socket.emit('live:error', { error: 'Only staff members can create live sessions' });
+          return;
         }
 
-        // Fetch host details to ensure we have a name
-        const hostUser = await User.findById(hostId);
-        const hostName = hostUser ? `${hostUser.firstName} ${hostUser.lastName}` : 'Host';
-        const hostRole = hostUser ? hostUser.role : 'host';
+        console.log(`📡 Live session creation: "${title}" by Host: ${hostId} (${hostRole})`);
 
-        const sessionCode = generateCallCode();
+        const hostName = `${socket.user.firstName || ''} ${socket.user.lastName || ''}`.trim() || 'Host';
+
+        // Use client-provided call code if available (so the host's displayed code matches the session)
+        const sessionCode = code && code.trim().length >= 4 ? code.trim().toUpperCase() : generateCallCode();
 
         const session = new LiveSession({
           sessionCode,
@@ -313,8 +452,14 @@ const setupSocketHandlers = (io) => {
 
     socket.on('live:join', async (data) => {
       try {
-        const { sessionCode, userId, userName, userRole } = data;
-        console.log(`📡 Request to join session: ${sessionCode} by ${userName} (${userId})`);
+        const { sessionCode } = data;
+
+        // Use authenticated user from socket (verified by JWT middleware)
+        const userId = socket.user.id;
+        const userRole = socket.user.role;
+        const userName = `${socket.user.firstName || ''} ${socket.user.lastName || ''}`.trim() || 'User';
+
+        console.log(`📡 Join session: ${sessionCode} by ${userName} (${userId}, ${userRole})`);
 
         let session = activeLiveSessions.get(sessionCode);
 
@@ -342,6 +487,31 @@ const setupSocketHandlers = (io) => {
             console.log(`❌ Session not found in DB or inactive: ${sessionCode}`);
             socket.emit('live:error', { error: 'Session not found or already ended' });
             return;
+          }
+        }
+
+        // ✅ SERVER-SIDE AUDIENCE VALIDATION (Fix #4 from report)
+        if (session.audience && session.audience !== 'all' && userRole === 'student') {
+          const studentUser = await User.findById(userId).select('grade curriculum').lean();
+          if (studentUser) {
+            let allowed = false;
+            const aud = session.audience;
+
+            if (aud === 'american') allowed = studentUser.curriculum === 'american';
+            else if (aud === 'national') allowed = studentUser.curriculum === 'national';
+            else if (aud.startsWith('grade')) allowed = String(studentUser.grade) === aud.replace('grade', '');
+            else if (aud.includes(':')) {
+              const [g, c] = aud.split(':');
+              allowed = String(studentUser.grade) === g && studentUser.curriculum === c;
+            } else {
+              allowed = true;
+            }
+
+            if (!allowed) {
+              console.log(`🚫 User ${userName} denied: audience mismatch (${aud})`);
+              socket.emit('live:error', { error: 'You do not have permission to join this session (grade/curriculum mismatch)' });
+              return;
+            }
           }
         }
 
@@ -398,14 +568,25 @@ const setupSocketHandlers = (io) => {
       }
 
       socket.leave(`live:${sessionCode}`);
-      socketMetadata.delete(socket.id);
+      // ✅ FIX: Don't delete metadata entirely — disconnect handler needs userId
+      const meta = socketMetadata.get(socket.id);
+      if (meta) meta.sessionCode = null;
+
+      // Sync DB
+      try {
+        await LiveSession.findByIdAndUpdate(session.sessionId, {
+          $pull: { participants: { userId } }
+        });
+      } catch (err) {
+        console.error('Error removing participant from DB:', err);
+      }
 
       io.to(`live:${sessionCode}`).emit('live:user_left', {
         userId,
         totalParticipants: session.participants.length
       });
 
-      // Close session if no participants remaining and it was a student leaving after host left
+      // Close session if no participants remaining
       if (session.participants.length === 0) {
         activeLiveSessions.delete(sessionCode);
         await LiveSession.findByIdAndUpdate(session.sessionId, {
@@ -420,7 +601,10 @@ const setupSocketHandlers = (io) => {
     // ==========================================
 
     socket.on('live:user_exit', async (data) => {
-      const { sessionCode, userId, userName, userRole } = data;
+      const { sessionCode } = data;
+      const userId = socket.user.id;
+      const userRole = socket.user.role;
+      const userName = `${socket.user.firstName || ''} ${socket.user.lastName || ''}`.trim() || 'User';
 
       console.log(`🚪 User ${userName} (${userRole}) is exiting call: ${sessionCode}`);
 
@@ -438,7 +622,9 @@ const setupSocketHandlers = (io) => {
 
       // Leave the socket room
       socket.leave(`live:${sessionCode}`);
-      socketMetadata.delete(socket.id);
+      // ✅ FIX: Don't delete metadata entirely — disconnect handler needs userId
+      const meta = socketMetadata.get(socket.id);
+      if (meta) meta.sessionCode = null;
 
       // Notify other participants about the exit
       io.to(`live:${sessionCode}`).emit('live:user_exited', {
@@ -463,12 +649,13 @@ const setupSocketHandlers = (io) => {
     });
 
     socket.on('live:end_session', async (data) => {
-      const { sessionCode, callerId } = data;
+      const { sessionCode } = data;
       const session = activeLiveSessions.get(sessionCode);
       if (!session) return;
 
-      // Verify caller is host (or check callerId if provided)
-      const participant = session.participants.find(p => p.userId === (callerId || socketMetadata.get(socket.id)?.userId));
+      // Verify caller is host
+      const callerId = socketMetadata.get(socket.id)?.userId;
+      const participant = session.participants.find(p => p.userId === callerId);
       const hasPermission = participant && ['admin', 'assistant', 'developer', 'host'].includes(participant.role);
 
       if (!hasPermission) {
@@ -525,6 +712,46 @@ const setupSocketHandlers = (io) => {
       console.log(`📡 User ${targetUserId} kicked from session ${sessionCode}`);
     });
 
+    // ==========================================
+    // RECORDING AND ZONES
+    // ==========================================
+
+    socket.on('live:recording_started', (data) => {
+      const { sessionCode } = data;
+      io.to(`live:${sessionCode}`).emit('live:recording_status', { isRecording: true });
+    });
+
+    socket.on('live:create_zone', async (data) => {
+      const { sessionCode, zoneName } = data;
+      const session = activeLiveSessions.get(sessionCode);
+      if (!session) return;
+      
+      const zoneId = `zone_${Date.now()}`;
+      
+      try {
+        await LiveSession.findByIdAndUpdate(session.sessionId, {
+          $push: { zones: { zoneId, zoneName, participants: [] } }
+        });
+        io.to(`live:${sessionCode}`).emit('live:zone_created', { zoneId, zoneName });
+      } catch (err) {
+        console.error('Error creating zone:', err);
+      }
+    });
+
+    socket.on('live:join_zone', (data) => {
+      const { sessionCode, zoneId, userId } = data;
+      // ✅ FIX: Don't leave main room — user needs session-wide events (e.g. session_ended)
+      // Just add the zone room as an additional room
+      socket.join(`live:${sessionCode}:${zoneId}`);
+      io.to(`live:${sessionCode}:${zoneId}`).emit('live:user_joined_zone', { userId, zoneId });
+    });
+
+    socket.on('live:leave_zone', (data) => {
+      const { sessionCode, zoneId, userId } = data;
+      socket.leave(`live:${sessionCode}:${zoneId}`);
+      io.to(`live:${sessionCode}`).emit('live:user_left_zone', { userId, zoneId });
+    });
+
     socket.on('live:mute_user', (data) => {
       const { sessionCode, userId } = data;
       const session = activeLiveSessions.get(sessionCode);
@@ -543,15 +770,17 @@ const setupSocketHandlers = (io) => {
     });
 
     socket.on('live:share_file', async (data) => {
-      const { sessionCode, fileName, fileSize, mimeType, uploadedBy, fileData } = data;
+      const { sessionCode, fileName, fileSize, mimeType, uploadedBy, fileUrl } = data;
 
-      // NOTE: We allow fileData as a convenience but warn in logs
-      if (fileData && fileData.length > 5 * 1024 * 1024) {
-        socket.emit('live:error', { error: 'File too large' });
+      // ✅ FIX: No longer relay binary data through socket.
+      // Files are uploaded via REST POST /api/live-sessions/:code/share-file
+      // This handler only broadcasts the metadata + URL to the room.
+      if (!fileUrl) {
+        socket.emit('live:error', { error: 'Use REST endpoint to upload files. Socket relay is deprecated.' });
         return;
       }
 
-      io.to(`live:${sessionCode}`).emit('live:file_shared', { fileName, fileSize, mimeType, uploadedBy, fileData });
+      io.to(`live:${sessionCode}`).emit('live:file_shared', { fileName, fileSize, mimeType, uploadedBy, fileUrl });
       console.log(`📡 File shared in session ${sessionCode}: ${fileName}`);
     });
 

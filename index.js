@@ -73,7 +73,8 @@ const server = http.createServer(app);
 
 // Reuse the same origins configuration used by Express CORS
 const defaultOrigins = [
-  'https://elraouf.netlify.app',
+  'https://elraouf.com',
+  'https://www.elraouf.com',
   'https://airy-miracle-production.up.railway.app',
   'https://elmnsa-backend-production.up.railway.app',
   'http://localhost:8000',
@@ -81,9 +82,12 @@ const defaultOrigins = [
   'http://localhost:3000'
 ];
 
-const allowedOrigins = process.env.CORS_ORIGIN 
-  ? process.env.CORS_ORIGIN.split(',') 
-  : defaultOrigins;
+// Always include defaultOrigins + any extra origins from env var
+const envOrigins = process.env.CORS_ORIGIN 
+  ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) 
+  : [];
+let allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
+console.log('🔐 CORS allowed origins:', allowedOrigins);
 
 const io = new Server(server, {
   cors: {
@@ -102,10 +106,23 @@ const io = new Server(server, {
 // ==========================================
 
 const corsOptions = {
-  origin: allowedOrigins,
+  origin: function (origin, callback) {
+    // Allow server-to-server requests with no origin
+    if (!origin) return callback(null, true);
+
+    // ✅ CORS tightening — exact list match only, no wildcard suffix
+    const isAllowed = allowedOrigins.includes(origin);
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ [SECURITY] CORS blocked for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'X-Device-ID']
 };
 
 app.use(cors(corsOptions));
@@ -119,30 +136,58 @@ const mongoSanitize = require('express-mongo-sanitize');
 const xss = require('xss');
 const hpp = require('hpp');
 
-// Set security headers with Helmet
-app.use(helmet());
+// ✅ CSP Hardening — removes unsafe-inline and unsafe-eval from scriptSrc
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc:  ["'self'"],                              // ❌ no unsafe-inline / unsafe-eval
+      styleSrc:   ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"], // CSS inline OK
+      imgSrc:     ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "wss:", "https:"],
+      fontSrc:    ["'self'", "https://fonts.gstatic.com"],
+      objectSrc:  ["'none'"],
+      frameSrc:   ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+  hsts: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  }
+}));
 
 // Data sanitization against NoSQL query injection
-app.use(mongoSanitize());
+// replaceWith: '_' replaces any $ or . in keys, onSanitize logs the attempt
+app.use(mongoSanitize({
+  replaceWith: '_',
+  onSanitize: ({ req, key }) => {
+    console.warn(`⚠️ [SECURITY] Sanitized suspicious field: "${key}" from IP: ${req.ip}`);
+  }
+}));
 
 // Data sanitization against XSS using the 'xss' library
 const filterXSS = xss;
 app.use((req, res, next) => {
   try {
-    const sanitizeObject = (obj) => {
-      if (!obj || typeof obj !== 'object') return obj;
+    const sanitizeObject = (obj, depth = 0) => {
+      if (!obj || typeof obj !== 'object' || depth > 5) return obj;
       for (const k of Object.keys(obj)) {
+        // Skip password-related fields — they're hashed, not rendered
+        if (/password|secret|token|key/i.test(k)) continue;
         if (typeof obj[k] === 'string') {
           obj[k] = filterXSS(obj[k]);
         } else if (typeof obj[k] === 'object') {
-          sanitizeObject(obj[k]);
+          sanitizeObject(obj[k], depth + 1);
         }
       }
     };
 
+    // Sanitize body and query — NOT params (params like ObjectId are not rendered)
     sanitizeObject(req.body);
     sanitizeObject(req.query);
-    sanitizeObject(req.params);
   } catch (e) {
     // If sanitization fails, continue without blocking request
     console.error('XSS sanitization error:', e);
@@ -157,45 +202,111 @@ app.use(hpp());
 // RATE LIMITING MIDDLEWARE
 // ==========================================
 
-// Helper to get a unique key for each client (User or IP)
-const getClientKey = (req) => {
-  // 1. Try to use User ID from Authorization header (if present)
-  // This ensures authenticated users are tracked individually even if they share an IP
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader; // Use token as a unique key for the session
-  }
-
-  // 2. Fallback to IP address, with explicit handling for Railway's proxy
-  // Note: app.set('trust proxy', 1) is already set above, but this adds extra safety
-  return req.headers['x-forwarded-for'] || req.ip || 'global_fallback';
-};
-
 // General API limiter
 const limiter = rateLimit({
   windowMs: (parseInt(process.env.RATE_LIMIT_WINDOW) || 15) * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 500 to 1000 for better UX
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: getClientKey, // Use our custom key generator
+  keyGenerator: (req) => {
+    // Use x-forwarded-for header (from reverse proxy) if available, otherwise use req.ip
+    const forwarded = req.headers['x-forwarded-for'];
+    return (forwarded && forwarded.split(',')[0].trim()) || req.ip || 'global_fallback';
+  },
   message: { success: false, message: 'Too many requests from this user, please try again later.' },
   skip: (req) => req.method === 'OPTIONS', // Don't limit pre-flight requests
 });
 
-// Stricter limiter for auth routes
+// ✅ Stricter limiter for login/access-code (10 attempts per 15 min per IP)
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30, // Increased from 20 to 30 to allow for some accidental retries
+  windowMs: 15 * 60 * 1000,
+  max: 10, // ✅ reduced from 40 → 10
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip, // Auth routes usually don't have tokens yet
-  message: { success: false, message: 'Too many login attempts from this IP, please try again after 15 minutes.' }
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    return (forwarded && forwarded.split(',')[0].trim()) || req.ip || 'global_fallback';
+  },
+  message: { success: false, message: 'Too many login attempts, please try again after 15 minutes.' }
+});
+
+// ✅ Registration limiter — 5 accounts per IP per hour (prevents mass fake signups)
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    return (forwarded && forwarded.split(',')[0].trim()) || req.ip || 'global_fallback';
+  },
+  message: { success: false, message: 'Too many registration attempts from this IP. Try again in an hour.' }
+});
+
+// ✅ Password reset limiter — 5 attempts per phone number per hour
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Key by phone number to prevent reset spam across IPs
+    const phone = (req.body?.phoneNumber || '').replace(/\D/g, '');
+    if (phone && phone.length >= 10) return `reset:phone:${phone}`;
+    const forwarded = req.headers['x-forwarded-for'];
+    return `reset:ip:${(forwarded && forwarded.split(',')[0].trim()) || req.ip || 'global_fallback'}`;
+  },
+  message: { success: false, message: 'Too many password reset attempts. Please try again in an hour.' }
+});
+
+// ✅ Lock code limiter — 10 attempts per IP per hour (prevents brute-force on 4-digit code)
+const lockLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    return (forwarded && forwarded.split(',')[0].trim()) || req.ip || 'global_fallback';
+  },
+  message: { success: false, message: 'Too many lock code attempts. Please try again in an hour.' }
 });
 
 app.use('/api/auth/login', authLimiter);
-app.use('/api/auth/register', authLimiter);
-app.use('/api/auth/verify-access-code', authLimiter); // Stricter limit for codes
+app.use('/api/auth/register', registerLimiter);          // ✅ dedicated register limiter
+app.use('/api/auth/verify-access-code', authLimiter);
+app.use('/api/auth/request-password-reset', resetLimiter); // ✅ reset limiter
+app.use('/api/auth/verify-reset-fallback',  resetLimiter); // ✅ reset limiter
+app.use('/api/auth/verify-reset-otp',       resetLimiter); // ✅ reset limiter
+app.use('/api/auth/reset-password',         resetLimiter); // ✅ reset limiter
+app.use('/api/auth/login-with-lock', lockLimiter);         // ✅ lock code limiter
 app.use('/api/', limiter);
+
+// ✅ Admin Access Logging & IP Whitelist Middleware
+app.use('/api/admin', async (req, res, next) => {
+  try {
+    // 1. IP Whitelisting Check
+    const allowedIpsStr = process.env.ADMIN_ALLOWED_IPS;
+    if (allowedIpsStr && allowedIpsStr.trim().length > 0) {
+      const allowedIps = allowedIpsStr.split(',').map(ip => ip.trim());
+      const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip;
+      
+      if (!allowedIps.includes(clientIp)) {
+        console.warn(`🛑 [SECURITY] Blocked unauthorized IP (${clientIp}) attempting to access Admin Panel.`);
+        return res.status(403).json({ success: false, message: 'Access denied: IP not whitelisted.' });
+      }
+    }
+
+    // 2. Logging
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = (forwarded && forwarded.split(',')[0].trim()) || req.ip || 'unknown';
+    const user = req.user ? `${req.user._id} (${req.user.role})` : 'unauthenticated';
+    console.log(`[ADMIN ACCESS] ${new Date().toISOString()} | IP: ${ip} | User: ${user} | ${req.method} ${req.path}`);
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ==========================================
 // EXPRESS MIDDLEWARE
@@ -257,6 +368,9 @@ const groupRoutes = require('./routes/groups');
 const announcementRoutes = require('./routes/announcement');
 const scheduleRoutes = require('./routes/schedule');
 const notificationRoutes = require('./routes/notifications');
+const whatsappRoutes = require('./routes/whatsapp');
+const examsRoutes = require('./routes/exams');
+const examCodesRoutes = require('./routes/examCodes');
 
 
 // ==========================================
@@ -277,6 +391,9 @@ app.use('/api/groups', groupRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/schedules', scheduleRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/exams', examsRoutes);
+app.use('/api/exam-codes', examCodesRoutes);
 
 app.use('/api/profile-requests', require('./routes/profileRequests'));
 app.use('/api/live-sessions', require('./routes/live-sessions'));
@@ -286,6 +403,9 @@ app.use('/api/live-sessions', require('./routes/live-sessions'));
 // ==========================================
 const { startCleanupService } = require('./services/cleanupService');
 startCleanupService();
+
+// WhatsApp Automation Service (lazy init after DB connection)
+const whatsappService = require('./services/whatsappService');
 
 
 // Health check endpoint
@@ -374,6 +494,14 @@ const gracefulShutdown = async (signal) => {
   server.close(async () => {
     console.log('🛑 Server closed');
 
+    // Disconnect WhatsApp client
+    try {
+      await whatsappService.disconnect();
+      console.log('🛑 WhatsApp disconnected');
+    } catch (error) {
+      console.error('❌ Error disconnecting WhatsApp:', error);
+    }
+
     try {
       await mongoose.disconnect();
       console.log('🛑 MongoDB disconnected');
@@ -447,6 +575,16 @@ const startServer = async () => {
     }
     console.log('✅ Database state confirmed');
 
+    // Initialize WhatsApp after DB is connected
+    if (dbConnected) {
+      try {
+        console.log('📱 Initializing WhatsApp Automation Service...');
+        await whatsappService.initialize(io);
+      } catch (waError) {
+        console.error('⚠️ WhatsApp init error (non-fatal):', waError.message);
+      }
+    }
+
     // Start HTTP server with Socket.io
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`
@@ -459,6 +597,7 @@ const startServer = async () => {
 ║ ✅ CORS Origin: ${process.env.CORS_ORIGIN || 'All origins'}
 ║ ✅ Health check: GET http://localhost:${PORT}/
 ║ ✅ Socket.io events: connection, authenticate, echo, broadcast
+║ ✅ WhatsApp: Automation Engine Active
 ╚════════════════════════════════════════════════════════╝
       `);
     });

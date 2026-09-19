@@ -18,7 +18,8 @@ exports.listThemes = async (req, res) => {
       { id: 'theme-ocean', name: 'Ocean', description: 'Ocean blue colors' },
       { id: 'theme-sunset', name: 'Sunset', description: 'Warm sunset colors' },
       { id: 'theme-purple', name: 'Purple', description: 'Purple theme' },
-      { id: 'theme-forest', name: 'Forest', description: 'Green forest colors' }
+      { id: 'theme-forest', name: 'Forest', description: 'Green forest colors' },
+      { id: 'assistant-theme', name: 'Assistant', description: 'Assistant purple theme' }
     ];
 
     res.status(200).json({
@@ -92,7 +93,7 @@ exports.applyTheme = async (req, res) => {
       });
     }
 
-    const validThemes = ['default', 'theme-dark', 'theme-light', 'theme-ocean', 'theme-sunset', 'theme-purple', 'theme-forest'];
+    const validThemes = ['default', 'theme-dark', 'theme-light', 'theme-ocean', 'theme-sunset', 'theme-purple', 'theme-forest', 'assistant-theme'];
     if (!validThemes.includes(themeName)) {
       return res.status(400).json({
         success: false,
@@ -100,16 +101,7 @@ exports.applyTheme = async (req, res) => {
       });
     }
 
-    // Check user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Create or update theme
+    // Create or update theme (skip user existence check — auth middleware already verified the requester)
     let theme = await Theme.findOne({ userId });
     if (!theme) {
       theme = new Theme({

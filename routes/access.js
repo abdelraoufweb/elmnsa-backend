@@ -65,21 +65,21 @@ if (process.env.NODE_ENV === 'development') {
  *   maxUsers: 100
  * }
  */
-router.post('/codes', authMiddleware, accessController.createAccessCode);
+router.post('/codes', authMiddleware, authorize(['admin', 'developer', 'assistant']), accessController.createAccessCode);
 
 /**
  * Get all access codes with filtering
  * GET /api/access/codes?type=parent&active=true&page=1&limit=20
  * Protected - admin/developer only
  */
-router.get('/codes', authMiddleware, accessController.getAccessCodes);
+router.get('/codes', authMiddleware, authorize(['admin', 'developer', 'assistant']), accessController.getAccessCodes);
 
 /**
- * Disable access code
- * PATCH /api/access/codes/:codeId/disable
- * Protected - admin/developer only
+ * Disable / Enable / Delete access code
+ * Protected - admin/developer/assistant
  */
-router.patch('/codes/:codeId/disable', authMiddleware, accessController.disableAccessCode);
-router.delete('/codes/:codeId', authMiddleware, accessController.deleteAccessCode);
+router.patch('/codes/:codeId/disable', authMiddleware, authorize(['admin', 'developer', 'assistant']), accessController.disableAccessCode);
+router.patch('/codes/:codeId/enable', authMiddleware, authorize(['admin', 'developer', 'assistant']), accessController.enableAccessCode);
+router.delete('/codes/:codeId', authMiddleware, authorize(['admin', 'developer', 'assistant']), accessController.deleteAccessCode);
 
 module.exports = router;

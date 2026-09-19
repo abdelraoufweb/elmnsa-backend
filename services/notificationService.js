@@ -3,7 +3,7 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 
 // Configure web-push with VAPID keys from environment
-webpush.setVAPIDDetails(
+webpush.setVapidDetails(
   `mailto:${process.env.VAPID_EMAIL || 'admin@example.com'}`,
   process.env.VAPID_PUBLIC_KEY,
   process.env.VAPID_PRIVATE_KEY
@@ -23,7 +23,7 @@ class NotificationService {
         recipientId,
         title: data.title,
         message: data.message,
-        type: data.type || 'general',
+        type: data.type || 'system',
         refId: data.refId,
         read: false
       });

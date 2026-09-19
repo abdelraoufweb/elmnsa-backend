@@ -7,6 +7,56 @@ const User = require('../models/User');
 const mongoose = require('mongoose');
 const notificationService = require('../services/notificationService');
 
+async function sendScheduleWhatsApp(schedule, isNew = true) {
+    try {
+        const whatsappService = require('../services/whatsappService');
+        const targetStudents = await User.find({
+            role: 'student',
+            status: 'approved',
+            grade: schedule.grade,
+            curriculum: schedule.curriculum
+        }).select('firstName lastName phoneNumber parentPhone');
+
+        if (targetStudents.length === 0) return;
+
+        const actionText = isNew ? 'تم تحديد موعد حصة جديد' : 'تم تحديث موعد الحصة';
+        const dateStr = new Date(schedule.dateTime).toLocaleString('ar-EG');
+        const waMessage = `🗓️ *${actionText}*\n\n📌 ${schedule.title}\n📅 الموعد: ${dateStr}\n📍 المكان: ${schedule.location}\n${schedule.notes ? `📝 ${schedule.notes}\n` : ''}`;
+
+        const recipients = [];
+        targetStudents.forEach(s => {
+            // Student message
+            recipients.push({
+                phone: s.phoneNumber,
+                message: `مرحباً ${s.firstName}،\n${waMessage}`,
+                logData: {
+                    type: 'announcement',
+                    studentId: s._id,
+                    recipientName: `${s.firstName} ${s.lastName}`,
+                    recipientType: 'student'
+                }
+            });
+            // Parent message
+            if (s.parentPhone) {
+                recipients.push({
+                    phone: s.parentPhone,
+                    message: `تنبيه لولي أمر الطالب ${s.firstName} ${s.lastName}،\n${waMessage}`,
+                    logData: {
+                        type: 'announcement',
+                        studentId: s._id,
+                        recipientName: `Parent of ${s.firstName}`,
+                        recipientType: 'parent'
+                    }
+                });
+            }
+        });
+
+        whatsappService.sendBatch(recipients);
+    } catch (err) {
+        console.error('WhatsApp schedule notification failed:', err);
+    }
+}
+
 // Get all schedules
 exports.getSchedules = async (req, res) => {
     try {
@@ -129,6 +179,7 @@ exports.createSchedule = async (req, res) => {
                 },
                 req.io
             );
+            sendScheduleWhatsApp(schedule, true);
         }
 
         res.status(201).json({
@@ -181,6 +232,7 @@ exports.updateSchedule = async (req, res) => {
                 },
                 req.io
             );
+            sendScheduleWhatsApp(schedule, false);
         }
 
         res.status(200).json({

@@ -88,17 +88,17 @@ const fileFilter = {
   },
 
   profile: (req, file, cb) => {
-    const allowed = ['.jpg', '.jpeg', '.png', '.gif'];
+    const allowed = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif'];
     const ext = path.extname(file.originalname).toLowerCase();
     if (allowed.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid image format'), false);
+      cb(new Error('Invalid image format. Allowed: jpg, png, webp, avif'), false);
     }
   },
 
   material: (req, file, cb) => {
-    const allowed = ['.pdf', '.doc', '.docx', '.xlsx', '.xls', '.ppt', '.pptx', '.txt', '.jpg', '.png', '.mp4', '.webm'];
+    const allowed = ['.pdf', '.doc', '.docx', '.xlsx', '.xls', '.ppt', '.pptx', '.txt', '.jpg', '.png', '.webp', '.avif', '.mp4', '.webm'];
     const ext = path.extname(file.originalname).toLowerCase();
     if (allowed.includes(ext)) {
       cb(null, true);

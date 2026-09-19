@@ -16,7 +16,8 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const timestamp = Date.now();
-    cb(null, `${timestamp}-${file.originalname}`);
+    const safeFilename = path.basename(file.originalname);
+    cb(null, `${timestamp}-${safeFilename}`);
   }
 });
 
@@ -42,6 +43,13 @@ const upload = multer({
  * GET /api/videos?grade=10&curriculum=american&page=1&limit=10
  */
 router.get('/', authMiddleware, videoController.listVideos);
+
+/**
+ * Stream video (proxied, hides actual URL from client)
+ * GET /api/videos/stream/:videoId
+ * Must be before /:videoId to avoid route collision
+ */
+router.get('/stream/:videoId', authMiddleware, videoController.streamVideo);
 
 /**
  * Get video details
@@ -88,9 +96,40 @@ router.post('/:videoId/access-codes', authMiddleware, authorize(['admin', 'assis
 /**
  * Get access codes for video
  * GET /api/videos/:videoId/access-codes
- * Admin or Developer only
+ * Admin, Developer or Assistant only
  */
 router.get('/:videoId/access-codes', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.getAccessCodes);
+
+/**
+ * Edit access code
+ * PUT /api/videos/access-codes/:codeId
+ * Admin, Developer or Assistant only
+ */
+router.put('/access-codes/:codeId', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.updateAccessCode);
+
+/**
+ * Mark access code as sold
+ * PATCH /api/videos/access-codes/:codeId/sell
+ */
+router.patch('/access-codes/:codeId/sell', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.sellCode);
+
+/**
+ * Mark a batch of video codes as saved to PDF
+ * PATCH /api/videos/batch/:batchId/mark-pdf
+ */
+router.patch('/batch/:batchId/mark-pdf', authMiddleware, authorize(['admin', 'assistant', 'developer']), videoController.markBatchPdf);
+
+/**
+ * Unlock a specific video using an access code
+ * POST /api/videos/:videoId/unlock
+ */
+router.post('/:videoId/unlock', authMiddleware, videoController.unlockVideo);
+
+/**
+ * Unlock a video using a code globally (determines video from code)
+ * POST /api/videos/unlock
+ */
+router.post('/unlock', authMiddleware, videoController.unlockVideo);
 
 /**
  * Get video progress

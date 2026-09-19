@@ -4,25 +4,23 @@
 
 const AccessCode = require('../models/AccessCode');
 const User = require('../models/User');
+const Video = require('../models/Video');
 const SecurityLog = require('../models/SecurityLog');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 // ============================================
 // HELPER FUNCTIONS
 // ============================================
 
 /**
- * Hash password using SHA256 with salt (for backward compatibility)
+ * Hash password using bcrypt
  * @param {string} plainPassword - Plain text password
- * @returns {string} - Hashed password
+ * @returns {Promise<string>} - Hashed password
  */
-const hashPassword = (plainPassword) => {
-  const salt = process.env.ENCRYPTION_KEY || 'default_salt_change_in_production';
-  return crypto
-    .createHash('sha256')
-    .update(plainPassword + salt)
-    .digest('hex');
+const hashPassword = async (plainPassword) => {
+  const saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
+  return bcrypt.hash(plainPassword, saltRounds);
 };
 
 /**
@@ -155,12 +153,31 @@ exports.verifyAccessCode = async (req, res) => {
       });
     }
 
+    // ✅ Enforce maxUsers limit BEFORE issuing token (bug fix Session 1 / 2026-09-11)
+    // BEFORE (buggy): maxUsers was tracked but never checked. Any number of users
+    //   could bypass the cap because the check never happened before token issuance.
+    // AFTER: fast-fail if already at capacity, then use atomic increment.
+    if (codeRecord.maxUsers && (codeRecord.currentUsers || 0) >= codeRecord.maxUsers) {
+      await logSecurityEvent({
+        type: 'access_code_capacity_reached',
+        userId: 'anonymous',
+        userName: 'Unknown',
+        userRole: 'guest',
+        description: `Access code at capacity: ${codeRecord.code} (${codeRecord.currentUsers}/${codeRecord.maxUsers})`,
+        ipAddress: req.ip,
+        severity: 'medium'
+      });
+      return res.status(429).json({
+        success: false,
+        message: 'This access code has reached its maximum number of uses'
+      });
+    }
+
     // ✅ Extract role and redirect from code record
     const role = codeRecord.role;
     const redirectTo = codeRecord.redirectTo || '/dashboard';
 
-    // ✅ Generate unique userId for this access
-    // For development: use a generated ID, for production: link to existing user
+    // ✅ Generate unique userId for this access (scoped, not tied to any real user)
     const userId = `access_${codeRecord._id}_${Date.now()}`;
 
     // ✅ Generate JWT token with role and userId
@@ -177,11 +194,28 @@ exports.verifyAccessCode = async (req, res) => {
       severity: 'low'
     });
 
-    // ✅ Update usage tracking (optional)
-    if (codeRecord.maxUsers || codeRecord.maxViewsPerUser) {
+    // ✅ Update usage tracking atomically.
+    // For maxUsers: atomic conditional increment prevents race conditions.
+    // For maxViewsPerUser only (no maxUsers cap): simple increment is fine.
+    if (codeRecord.maxUsers) {
+      const updated = await AccessCode.findOneAndUpdate(
+        { _id: codeRecord._id, $expr: { $lt: ['$currentUsers', '$maxUsers'] } },
+        { $inc: { currentUsers: 1 } },
+        { new: true }
+      );
+      if (!updated) {
+        // Another concurrent request won the race — capacity was reached between
+        // our fast-fail check above and this atomic update.
+        return res.status(429).json({
+          success: false,
+          message: 'This access code has reached its maximum number of uses'
+        });
+      }
+    } else if (codeRecord.maxViewsPerUser) {
       codeRecord.currentUsers = (codeRecord.currentUsers || 0) + 1;
       await codeRecord.save();
     }
+
     // ✅ Return success response with token and redirect URL
     return res.status(200).json({
       success: true,
@@ -262,8 +296,8 @@ exports.validateToken = async (req, res) => {
  */
 exports.createAccessCode = async (req, res) => {
   try {
-    // ✅ Authorization - admin/developer only
-    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+    // ✅ Authorization - admin/developer/assistant
+    if (!req.user || !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Only admin or developer can create access codes'
@@ -345,10 +379,10 @@ exports.createAccessCode = async (req, res) => {
 exports.getAccessCodes = async (req, res) => {
   try {
     // ✅ Authorization
-    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+    if (!req.user || !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only admin or developer can view access codes'
+        message: 'Only admin, developer, or assistant can view access codes'
       });
     }
 
@@ -403,7 +437,7 @@ exports.getAccessCodes = async (req, res) => {
 exports.disableAccessCode = async (req, res) => {
   try {
     // ✅ Authorization
-    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+    if (!req.user || !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Only admin or developer can disable access codes'
@@ -425,6 +459,12 @@ exports.disableAccessCode = async (req, res) => {
         message: 'Access code not found'
       });
     }
+
+    // 🧹 Revoke access from all students who used this code
+    await User.updateMany(
+      { 'unlockedVideos.codeId': code._id },
+      { $pull: { unlockedVideos: { codeId: code._id } } }
+    );
 
     // Log action
     await logSecurityEvent({
@@ -448,6 +488,51 @@ exports.disableAccessCode = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to disable access code'
+    });
+  }
+};
+
+/**
+ * Enable access code (Admin/Developer only)
+ * PATCH /api/access/codes/:codeId/enable
+ */
+exports.enableAccessCode = async (req, res) => {
+  try {
+    // ✅ Authorization
+    if (!req.user || !['admin', 'developer', 'assistant'].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admin or developer can enable access codes'
+      });
+    }
+
+    const { codeId } = req.params;
+
+    // Find and update code
+    const code = await AccessCode.findByIdAndUpdate(
+      codeId,
+      { active: true },
+      { new: true }
+    );
+
+    if (!code) {
+      return res.status(404).json({
+        success: false,
+        message: 'Access code not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Access code enabled',
+      data: code
+    });
+
+  } catch (error) {
+    console.error('Enable access code error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to enable access code'
     });
   }
 };
@@ -524,16 +609,33 @@ exports.createTestAccessCode = async (req, res) => {
  */
 exports.deleteAccessCode = async (req, res) => {
   try {
-    if (!req.user || !['admin', 'developer'].includes(req.user.role)) {
+    if (!req.user || !['admin', 'developer', 'assistant'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
     const { codeId } = req.params;
-    const deleted = await AccessCode.findByIdAndDelete(codeId);
 
-    if (!deleted) {
+    // Get code before deleting to know linked video
+    const code = await AccessCode.findById(codeId);
+    if (!code) {
       return res.status(404).json({ success: false, message: 'Access code not found' });
     }
+
+    const videoId = code.linkedResource;
+
+    // Delete the code
+    await AccessCode.findByIdAndDelete(codeId);
+
+    // 🆓 Make the linked video free (public)
+    if (videoId) {
+      await Video.findByIdAndUpdate(videoId, { $set: { isPublic: true } });
+    }
+
+    // 🧹 Remove this code from all students' unlockedVideos
+    await User.updateMany(
+      { 'unlockedVideos.codeId': codeId },
+      { $pull: { unlockedVideos: { codeId } } }
+    );
 
     res.status(200).json({ success: true, message: 'Access code deleted successfully' });
   } catch (error) {

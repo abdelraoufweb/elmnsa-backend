@@ -23,7 +23,7 @@ const orderSchema = new mongoose.Schema({
 
   // Items
   items: [{
-    productId: mongoose.Schema.Types.ObjectId,
+    productId: String,
     productName: String,
     price: Number,
     quantity: Number,

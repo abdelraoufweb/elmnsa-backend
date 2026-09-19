@@ -514,7 +514,7 @@ exports.blockUser = async (req, res) => {
       userName: `${user.firstName} ${user.lastName}`,
       userRole: user.role,
       description: `User PERMANENTLY BLOCKED by ${req.user.role}: ${reason || 'No reason'}`,
-      severity: 'high'
+      severity: 'error'
     });
 
     res.status(200).json({
@@ -699,7 +699,7 @@ exports.deleteUser = async (req, res) => {
       userRole: user.role,
       message: `Account deleted by ${req.user.role}`,
       description: `Account deleted by ${req.user.role}`,
-      severity: 'high'
+      severity: 'error'
     });
 
     // Delete the user

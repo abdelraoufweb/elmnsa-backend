@@ -65,6 +65,32 @@ const userSchema = new mongoose.Schema({
   parentPhone: String,
   schoolName: String,
 
+  // Combination Lock Code (4-digit PIN for alternative login)
+  lockCode: {
+    type: String,
+    default: null
+  },
+
+  // Password set when using Access Code (for parent/assistant accounts)
+  accessCodePassword: {
+    type: String,
+    default: null
+  },
+
+  // Password Reset OTP
+  resetPasswordOtp: {
+    type: String,
+    default: null
+  },
+  resetPasswordOtpExpires: {
+    type: Date,
+    default: null
+  },
+  resetPasswordAttempts: {
+    type: Number,
+    default: 0
+  },
+
   // Parent Specific
   childrenIds: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -87,11 +113,36 @@ const userSchema = new mongoose.Schema({
     default: false
   },
   videoAccessCode: String,
+  unlockedVideos: [{
+    videoId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Video'
+    },
+    unlockedAt: Date,
+    expiryDate: Date,
+    codeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'AccessCode'
+    }
+  }],
   aiAccessUnlocked: {
     type: Boolean,
     default: false
   },
   aiAccessCode: String,
+  aiPermissions: {
+    type: String,
+    enum: ['chat', 'voice', 'both'],
+    default: 'both'
+  },
+  aiNotes: [{
+    type: String,
+    _id: false
+  }],
+  aiCompletedLessons: [{
+    type: String,
+    _id: false
+  }],
 
   // Device & Phone Management (for students)
   approvedDevices: [{

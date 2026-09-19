@@ -5,6 +5,9 @@ const VideoProgress = require('../models/VideoProgress');
 const { validateFileContent } = require('../utils/fileValidators');
 const { uploadFile, deleteFileFromR2 } = require('../services/s3Service');
 const { deleteFile } = require('../middleware/fileUpload');
+const https = require('https');
+const http = require('http');
+const urlMod = require('url');
 
 // ============================================
 // PROGRESS ENDPOINTS
@@ -29,16 +32,19 @@ exports.saveProgress = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid progress: must be a number between 0 and 100' });
     }
 
+    // ✅ Atomic upsert — eliminates read-modify-write race condition
+    const updateFields = {
+      progress: parsedProgress,
+      lastWatched: Date.now()
+    };
+    if (typeof completed !== 'undefined') {
+      updateFields.completed = Boolean(completed);
+    }
+
     const videoProgress = await VideoProgress.findOneAndUpdate(
       { user: req.user.id, video: videoId },
-      {
-        $set: {
-          progress: parsedProgress,
-          lastWatched: Date.now(),
-          ...(typeof completed !== 'undefined' && { completed: Boolean(completed) })
-        }
-      },
-      { new: true, upsert: true }
+      { $set: updateFields },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
     res.status(200).json({ success: true, data: videoProgress });
@@ -123,18 +129,24 @@ exports.listVideos = async (req, res) => {
     // Count total
     const total = await Video.countDocuments(query);
 
-    // Sanitize for students without access
-    if (req.user && req.user.role === 'student' && !req.user.videoAccessUnlocked) {
-      // Convert to plain objects and remove sensitive fields
-      const sanitizedVideos = videos.map(v => {
-        // If video is public, don't sanitize its URLs
-        if (v.isPublic) return v;
+    // 🧹 Purge expired unlockedVideos for students before listing
+    if (req.user && req.user.role === 'student') {
+      try {
+        await User.findByIdAndUpdate(req.user.id, {
+          $pull: { unlockedVideos: { expiryDate: { $lt: new Date() } } }
+        });
+      } catch (pullErr) {
+        console.error('Expiry purge error:', pullErr);
+      }
+    }
 
+    // Strip raw video URLs from student responses (use stream endpoint instead)
+    if (req.user && req.user.role === 'student') {
+      const sanitizedVideos = videos.map(v => {
         const video = { ...v };
+        // Always strip mp4Url — student must use /api/videos/stream/:id
         delete video.mp4Url;
         delete video.mp4Path;
-        delete video.youtubeUrl;
-        delete video.youtubeId;
         return video;
       });
 
@@ -186,16 +198,43 @@ exports.getVideo = async (req, res) => {
       });
     }
 
+    // 🧹 Purge expired unlockedVideos for students before access check
+    if (req.user?.role === 'student') {
+      try {
+        await User.findByIdAndUpdate(req.user.id, {
+          $pull: { unlockedVideos: { expiryDate: { $lt: new Date() } } }
+        });
+      } catch (pullErr) {
+        console.error('Expiry purge error:', pullErr);
+      }
+    }
+
     // Authorization check for students (guard in case req.user is not present)
-    if (req.user?.role === 'student' && !req.user?.videoAccessUnlocked) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied. Please purchase video access to view this content.'
-      });
+    if (req.user?.role === 'student' && !req.user?.videoAccessUnlocked && !video.isPublic) {
+      // Check if specifically unlocked
+      const unlocked = (req.user.unlockedVideos || []).some(uv => uv.videoId.toString() === req.params.videoId);
+      
+      if (!unlocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied. Please purchase video access to view this content.'
+        });
+      }
     }
 
     // Atomic increment views (fix race condition)
     await Video.findByIdAndUpdate(req.params.videoId, { $inc: { views: 1 } });
+
+    // Strip raw URL from student response (use stream endpoint instead)
+    if (req.user?.role === 'student') {
+      const data = video.toObject ? video.toObject() : { ...video };
+      delete data.mp4Url;
+      delete data.mp4Path;
+      return res.status(200).json({
+        success: true,
+        data
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -208,6 +247,98 @@ exports.getVideo = async (req, res) => {
       message: 'Failed to fetch video',
       error: error.message
     });
+  }
+};
+
+// ============================================
+// STREAM ENDPOINT (proxy R2 URL, hides actual link)
+// ============================================
+
+/**
+ * Stream video via proxy (hides actual R2 URL from client)
+ * GET /api/videos/stream/:videoId
+ */
+exports.streamVideo = async (req, res) => {
+  try {
+    const video = await Video.findById(req.params.videoId);
+    if (!video) {
+      return res.status(404).json({ success: false, message: 'Video not found' });
+    }
+
+    // Access check (same as getVideo)
+    if (req.user?.role === 'student' && !req.user?.videoAccessUnlocked && !video.isPublic) {
+      const unlocked = (req.user.unlockedVideos || []).some(uv => uv.videoId.toString() === req.params.videoId);
+      if (!unlocked) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+    }
+
+    if (!video.mp4Url && !video.youtubeUrl) {
+      return res.status(404).json({ success: false, message: 'No video source available' });
+    }
+
+    // YouTube — redirect to embed (URL is inherently public)
+    if (video.youtubeUrl && !video.mp4Url) {
+      const m = video.youtubeUrl.match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+      if (m) {
+        return res.redirect(`https://www.youtube.com/embed/${m[1]}?autoplay=1&modestbranding=1&rel=0`);
+      }
+      return res.status(400).json({ success: false, message: 'Invalid YouTube URL' });
+    }
+
+    // MP4 — proxy from R2 (actual URL never reaches client)
+    const videoUrl = video.mp4Url;
+    const parsedUrl = urlMod.parse(videoUrl);
+    const httpModule = parsedUrl.protocol === 'https:' ? https : http;
+
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.path,
+      method: 'GET',
+      headers: {}
+    };
+
+    // Forward Range header for seeking support
+    if (req.headers.range) {
+      options.headers.range = req.headers.range;
+    }
+
+    const proxyReq = httpModule.request(options, (proxyRes) => {
+      const statusCode = proxyRes.statusCode || 200;
+
+      // Forward relevant headers
+      if (proxyRes.headers['content-type']) {
+        res.setHeader('Content-Type', proxyRes.headers['content-type']);
+      }
+      if (proxyRes.headers['content-length']) {
+        res.setHeader('Content-Length', proxyRes.headers['content-length']);
+      }
+      if (proxyRes.headers['content-range']) {
+        res.setHeader('Content-Range', proxyRes.headers['content-range']);
+      }
+      if (proxyRes.headers['accept-ranges']) {
+        res.setHeader('Accept-Ranges', proxyRes.headers['accept-ranges']);
+      }
+      if (proxyRes.headers['cache-control']) {
+        res.setHeader('Cache-Control', proxyRes.headers['cache-control']);
+      }
+
+      res.writeHead(statusCode);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error('Stream proxy error:', err);
+      if (!res.headersSent) {
+        res.status(502).json({ success: false, message: 'Failed to stream video' });
+      }
+    });
+
+    proxyReq.end();
+  } catch (error) {
+    console.error('Stream video error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -288,6 +419,37 @@ exports.createVideo = async (req, res) => {
       req.io
     );
 
+    // ── WhatsApp Notification: New Video to active students ──────────
+    try {
+      const whatsappService = require('../services/whatsappService');
+      const User = require('../models/User');
+      
+      // Find active students in matching grade & curriculum
+      const targetStudents = await User.find({
+        role: 'student',
+        status: 'approved',
+        grade: video.grade,
+        curriculum: video.curriculum
+      }).select('firstName lastName phoneNumber');
+
+      if (targetStudents.length > 0) {
+        const recipients = targetStudents.map(s => ({
+          phone: s.phoneNumber,
+          message: `🎥 *فيديو جديد متاح!*\n\n📺 ${video.title}\n${video.description ? `📝 ${video.description}\n` : ''}\n✅ شاهد الفيديو الآن من المنصة`,
+          logData: {
+            type: 'content',
+            studentId: s._id,
+            recipientName: `${s.firstName} ${s.lastName}`,
+            recipientType: 'student'
+          }
+        }));
+        whatsappService.sendBatch(recipients);
+        console.log(`📱 [WhatsApp] Queued ${recipients.length} video notifications`);
+      }
+    } catch (waErr) {
+      console.error('WhatsApp notification for new video failed:', waErr);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Video created successfully',
@@ -343,9 +505,6 @@ exports.uploadMP4 = async (req, res) => {
     // MAGIC BYTE VALIDATION
     const isValidFile = await validateFileContent(req.file.path, 'video/mp4');
     if (!isValidFile) {
-      const fs = require('fs');
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-
       return res.status(400).json({
         success: false,
         message: 'Invalid file content (spoofed extension detected)',
@@ -379,6 +538,19 @@ exports.uploadMP4 = async (req, res) => {
       message: 'Failed to upload MP4',
       error: error.message
     });
+  } finally {
+    // Clean up local uploaded file in all conditions to prevent leaks
+    if (req.file && req.file.path) {
+      const fs = require('fs');
+      if (fs.existsSync(req.file.path)) {
+        try {
+          fs.unlinkSync(req.file.path);
+          console.log(`🧹 Cleaned up local video file: ${req.file.path}`);
+        } catch (err) {
+          console.error('Failed to cleanup video file:', err.message);
+        }
+      }
+    }
   }
 };
 
@@ -488,47 +660,55 @@ exports.deleteVideo = async (req, res) => {
 /**
  * Create access codes for video
  * POST /api/videos/:videoId/access-codes
+ * Body: { count, durationDays, expiryDays, prefix }
  */
 exports.createAccessCodes = async (req, res) => {
   try {
-    const { codes } = req.body;  // Array of code objects
+    const { count = 10, durationDays, expiryDays, prefix = 'VID-' } = req.body;
 
-    if (!Array.isArray(codes) || codes.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Codes array required'
-      });
+    const numCount = parseInt(count, 10);
+    if (isNaN(numCount) || numCount <= 0 || numCount > 1000) {
+      return res.status(400).json({ success: false, message: 'Count must be between 1 and 1000' });
     }
 
     const video = await Video.findById(req.params.videoId);
     if (!video) {
-      return res.status(404).json({
-        success: false,
-        message: 'Video not found'
+      return res.status(404).json({ success: false, message: 'Video not found' });
+    }
+
+    const { v4: uuidv4 } = require('uuid');
+    const generationBatchId = uuidv4();
+    const codesToInsert = [];
+
+    const calculatedExpiry = expiryDays 
+      ? new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000) 
+      : null;
+
+    for (let i = 0; i < numCount; i++) {
+      const randomPart = Math.random().toString(36).substring(2, 10).toUpperCase();
+      const codeStr = `${prefix}${randomPart}`;
+      
+      codesToInsert.push({
+        code: codeStr,
+        type: 'video',
+        role: 'student',
+        maxUsers: 1, // standard for video codes
+        expiryDate: calculatedExpiry,
+        durationDays: durationDays || null,
+        linkedResource: video._id,
+        generationBatchId,
+        createdBy: req.user.id
       });
     }
 
-    // Create codes
-    const createdCodes = await Promise.all(
-      codes.map(codeData =>
-        AccessCode.create({
-          code: codeData.code,
-          type: 'video',
-          maxUsers: codeData.maxUsers || null,
-          expiryDate: codeData.expiryDays
-            ? new Date(Date.now() + codeData.expiryDays * 24 * 60 * 60 * 1000)
-            : null,
-          createdBy: req.user.id,
-          linkedResource: video._id
-        })
-      )
-    );
+    const createdCodes = await AccessCode.insertMany(codesToInsert);
 
     res.status(201).json({
       success: true,
       message: 'Access codes created',
       data: {
         codesCreated: createdCodes.length,
+        generationBatchId,
         codes: createdCodes.map(c => ({
           id: c._id,
           code: c.code,
@@ -547,33 +727,256 @@ exports.createAccessCodes = async (req, res) => {
 };
 
 /**
- * Get video access codes (Admin/Developer only)
+ * Get video access codes (Admin/Developer/Assistant only)
  * GET /api/videos/:videoId/access-codes
+ * Query: page, limit, batchId
  */
 exports.getAccessCodes = async (req, res) => {
   try {
     // Authorization
     if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only admin, developer, or assistant can view access codes'
-      });
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
-    const codes = await AccessCode.find({
+    const { page = 1, limit = 50, batchId } = req.query;
+    const filter = {
       linkedResource: req.params.videoId,
       type: 'video'
-    });
+    };
+    
+    if (batchId) {
+      filter.generationBatchId = batchId;
+    }
+
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+    const codes = await AccessCode.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit, 10))
+      .lean();
+
+    const total = await AccessCode.countDocuments(filter);
 
     res.status(200).json({
       success: true,
-      data: codes
+      data: codes,
+      pagination: {
+        total,
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        pages: Math.ceil(total / parseInt(limit, 10))
+      }
     });
   } catch (error) {
     console.error('Get access codes error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch access codes' });
+  }
+};
+
+/**
+ * Mark a video access code as sold
+ * PATCH /api/videos/access-codes/:codeId/sell
+ */
+exports.sellCode = async (req, res) => {
+  try {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
+    }
+    const code = await AccessCode.findById(req.params.codeId);
+    if (!code || code.type !== 'video') return res.status(404).json({ success: false, message: 'Code not found' });
+    if (code.isSold) return res.status(400).json({ success: false, message: 'Code is already marked as sold' });
+
+    code.isSold = true;
+    code.soldAt = new Date();
+    await code.save();
+
+    res.json({ success: true, data: code });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Mark a batch of video codes as saved to PDF
+ * PATCH /api/videos/batch/:batchId/mark-pdf
+ */
+exports.markBatchPdf = async (req, res) => {
+  try {
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Unauthorized' });
+    }
+    const { batchId } = req.params;
+    if (!batchId) return res.status(400).json({ success: false, message: 'Batch ID is required' });
+
+    const result = await AccessCode.updateMany(
+      { generationBatchId: batchId, type: 'video' },
+      { $set: { savedInPdf: true } }
+    );
+
+    res.json({ success: true, modifiedCount: result.modifiedCount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Edit a specific access code
+ * PUT /api/videos/access-codes/:codeId
+ */
+exports.updateAccessCode = async (req, res) => {
+  try {
+    // Authorization
+    if (!['admin', 'developer', 'assistant'].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized to edit access codes'
+      });
+    }
+
+    const { maxUsers, durationDays, expiryDays, active, code } = req.body;
+    
+    const updateData = {};
+    if (typeof maxUsers !== 'undefined') updateData.maxUsers = maxUsers;
+    if (typeof durationDays !== 'undefined') updateData.durationDays = durationDays;
+    if (typeof active !== 'undefined') updateData.active = active;
+    if (typeof code !== 'undefined') updateData.code = code;
+    if (typeof expiryDays !== 'undefined') {
+      updateData.expiryDate = expiryDays ? new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000) : null;
+    }
+
+    const updatedCode = await AccessCode.findByIdAndUpdate(
+      req.params.codeId,
+      { $set: updateData },
+      { new: true }
+    );
+
+    if (!updatedCode) {
+      return res.status(404).json({ success: false, message: 'Access code not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Access code updated',
+      data: updatedCode
+    });
+  } catch (error) {
+    console.error('Update access code error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update access code' });
+  }
+};
+
+/**
+ * Unlock a specific video using an access code
+ * POST /api/videos/unlock (or /api/videos/:videoId/unlock)
+ */
+exports.unlockVideo = async (req, res) => {
+  try {
+    const { code } = req.body;
+    let { videoId } = req.params;
+
+    if (!code) {
+      return res.status(400).json({ success: false, message: 'Access code is required' });
+    }
+
+    // Find access code (exact match, type video)
+    const accessCode = await AccessCode.findOne({
+      code: code,
+      type: 'video',
+      active: true
+    });
+
+    if (!accessCode) {
+      return res.status(400).json({ success: false, message: '❌ رمز الوصول غير صحيح' });
+    }
+    
+    // If videoId not provided in route, get it from code
+    if (!videoId) {
+      if (!accessCode.linkedResource) {
+        return res.status(400).json({ success: false, message: '❌ رمز الوصول هذا غير مرتبط بفيديو محدد' });
+      }
+      videoId = accessCode.linkedResource.toString();
+    }
+
+    // 1. Find video
+    const video = await Video.findById(videoId);
+    if (!video) {
+      return res.status(404).json({ success: false, message: 'Video not found' });
+    }
+
+    // Check if code is for this specific video
+    if (accessCode.linkedResource && accessCode.linkedResource.toString() !== videoId) {
+      return res.status(400).json({ success: false, message: '❌ هذا الرمز يخص فيديو آخر' });
+    }
+
+    // Check expiry
+    if (accessCode.expiryDate && new Date() > accessCode.expiryDate) {
+      return res.status(400).json({ success: false, message: '❌ رمز الوصول منتهي الصلاحية' });
+    }
+
+    // 🎯 Calculate expiry dynamically if durationDays is set
+    let calculatedExpiry = accessCode.expiryDate;
+    if (accessCode.durationDays) {
+      calculatedExpiry = new Date(Date.now() + accessCode.durationDays * 24 * 60 * 60 * 1000);
+    }
+
+    // 3. ✅ Atomic check-and-add unlockedVideo first (prevents duplicate unlocks)
+    const updatedUser = await User.findOneAndUpdate(
+      {
+        _id: req.user.id,
+        'unlockedVideos.videoId': { $ne: videoId }
+      },
+      {
+        $push: {
+          unlockedVideos: {
+            videoId,
+            unlockedAt: new Date(),
+            expiryDate: calculatedExpiry,
+            codeId: accessCode._id
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(200).json({ success: true, message: '❌ الفيديو مفعل بالفعل' });
+    }
+
+    // 4. ✅ Only increment counter after successful unlock
+    if (accessCode.maxUsers) {
+      const updatedCode = await AccessCode.findOneAndUpdate(
+        { _id: accessCode._id, active: true, $expr: { $lt: ['$currentUsers', '$maxUsers'] } },
+        { 
+          $inc: { currentUsers: 1 },
+          $set: { 
+            usedByStudentId: req.user.id,
+            usedByStudentName: `${req.user.firstName} ${req.user.lastName}`
+          } 
+        },
+        { new: true }
+      );
+      if (!updatedCode) {
+        // 🧹 Rollback — maxUsers exhausted, remove the unlock
+        await User.findByIdAndUpdate(req.user.id, { $pull: { unlockedVideos: { videoId } } });
+        return res.status(400).json({ success: false, message: '❌ تم استنفاد الحد الأقصى لاستخدام هذا الرمز' });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'تم تفعيل الفيديو بنجاح',
+      data: {
+        videoId: videoId,
+        expiryDate: calculatedExpiry
+      }
+    });
+
+  } catch (error) {
+    console.error('Unlock video error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch access codes',
+      message: 'حدث خطأ أثناء تفعيل الفيديو',
       error: error.message
     });
   }

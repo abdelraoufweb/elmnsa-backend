@@ -62,6 +62,20 @@ const liveSessionSchema = new mongoose.Schema({
   recordingUrl: String,
   recordingSize: Number,
 
+  // Zones/Rooms within session
+  zones: [{
+    zoneId: { type: String, required: true },
+    zoneName: { type: String, default: 'Main Room' },
+    participants: [{ userId: mongoose.Schema.Types.ObjectId, name: String }],
+    maxCapacity: { type: Number, default: 50 },
+    createdAt: { type: Date, default: Date.now }
+  }],
+
+  // Session settings
+  maxParticipants: { type: Number, default: 100 },
+  allowRejoin: { type: Boolean, default: true },
+  autoRecord: { type: Boolean, default: false },
+
   createdAt: {
     type: Date,
     default: Date.now
